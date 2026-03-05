@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>GlobalBank — Private</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Syne:wght@400;500;600;700&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, get, onValue, push, remove, update }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDfrutZukr5JDFmE2KJDA11HZZ8Tk1L4eA",
+  authDomain: "globalbank-f3adc.firebaseapp.com",
+  databaseURL: "https://globalbank-f3adc-default-rtdb.firebaseio.com",
+  projectId: "globalbank-f3adc",
+  storageBucket: "globalbank-f3adc.firebasestorage.app",
+  messagingSenderId: "510370388822",
+  appId: "1:510370388822:web:bea50649774c656f6954f7"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+// ── STATE ─────────────────────────────────────────────────────────────────
+let currentUser  = null; // { username, role, uid }
+let allUsers     = {};
+let transactions = {};
+let balance      = 0;
+let liveUnsub    = null;
+
+// ── FIREBASE HELPERS ──────────────────────────────────────────────────────
+const fbSet    = (p,v)    => set(ref(db,p), v);
+const fbGet    = async p  => { const s=await get(ref(db,p)); return s.exists()?s.val():null; };
+const fbPush   = async(p,v)=>{ const r=push(ref(db,p)); await set(r,v); return r.key; };
+const fbRemove = p        => remove(ref(db,p));
+const fbUpdate = (p,v)   => update(ref(db,p), v);
+
+// ── HELPERS ───────────────────────────────────────────────────────────────
+const fmt = n => '$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const nowStr = () => new Date().toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+const isAdmin = () => currentUser && currentUser.role === 'admin';
+
+function showToast(msg, color='#00d48a') {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.background = color;
+  t.style.display = 'block';
+  setTimeout(()=> t.style.display='none', 3000);
+}
+function showMsg(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.style.display = 'block';
+  setTimeout(()=> el.style.display='none', 3500);
+}
+
+// ── INIT ADMIN ─────────────────────────────────────────────────────────────
+async function ensureAdmin() {
+  const existing = await fbGet('users/admin');
+  if (!existing) {
+    await fbSet('users/admin', {
+      username: 'admin',
+      password: 'admin9999',
+      role: 'admin',
+      name: 'Administrator',
+      createdAt: nowStr(),
+    });
+  }
+  const bank = await fbGet('bank');
+  if (!bank) {
+    await fbSet('bank', { balance: 0, transactions: {} });
+  }
+}
+
+// ── LOGIN ─────────────────────────────────────────────────────────────────
+window.doLogin = async function() {
+  const username = document.getElementById('loginUsername').value.trim().toLowerCase();
+  const password = document.getElementById('loginPassword').value.trim();
+  if (!username || !password) { showMsg('loginError'); return; }
+
+  await ensureAdmin();
+  const users = await fbGet('users') || {};
+  const user  = users[username];
+
+  if (!user || user.password !== password) {
+    document.getElementById('loginError').style.display = 'block';
+    setTimeout(()=> document.getElementById('loginError').style.display='none', 3000);
+    document.getElementById('loginPassword').value = '';
+    return;
+  }
+
+  currentUser = { username, role: user.role, name: user.name || username };
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  document.getElementById('loggedInName').textContent = currentUser.name.toUpperCase();
+  document.getElementById('adminBadge').style.display = isAdmin() ? 'inline-flex' : 'none';
+
+  startLiveSync();
+  buildAdminUI();
+  showPage('dashboard', document.querySelectorAll('.nav-tab')[0]);
+};
+
+window.doLogout = function() {
+  if (liveUnsub) liveUnsub();
+  currentUser = null;
+  document.getElementById('loginScreen').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginUsername').value = '';
+  document.getElementById('loginPassword').value = '';
+};
+
+// ── LIVE SYNC ─────────────────────────────────────────────────────────────
+function startLiveSync() {
+  if (liveUnsub) liveUnsub();
+  liveUnsub = onValue(ref(db, 'bank'), snap => {
+    if (!snap.exists()) return;
+    const d = snap.val();
+    balance      = d.balance      || 0;
+    transactions = d.transactions || {};
+    refreshUI();
+  });
+  onValue(ref(db, 'users'), snap => {
+    allUsers = snap.exists() ? snap.val() : {};
+    renderUsersList();
+  });
+}
+
+// ── NAVIGATION ────────────────────────────────────────────────────────────
+window.showPage = function(id, tabEl) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  const pg = document.getElementById('page-'+id);
+  if (pg) pg.classList.add('active');
+  if (tabEl) tabEl.classList.add('active');
+  document.querySelectorAll('.success-msg,.error-msg').forEach(el => el.style.display='none');
+};
+
+// ── BUILD ADMIN-ONLY UI ───────────────────────────────────────────────────
+function buildAdminUI() {
+  // Show/hide admin nav tab
+  const adminTab = document.getElementById('adminNavTab');
+  if (adminTab) adminTab.style.display = isAdmin() ? 'block' : 'none';
+
+  // Show/hide generator
+  const gen = document.getElementById('generatorSection');
+  if (gen) gen.style.display = isAdmin() ? 'block' : 'none';
+
+  // Show/hide settings sections
+  const adminSettings = document.getElementById('adminSettingsSection');
+  if (adminSettings) adminSettings.style.display = isAdmin() ? 'block' : 'none';
+
+  // Hide change password for regular users
+  const pwSection = document.getElementById('changePwSection');
+  if (pwSection) pwSection.style.display = 'none'; // hidden for all, admin manages
+}
+
+// ── TRANSACTIONS ──────────────────────────────────────────────────────────
+async function addTx(type, amount, desc) {
+  await fbPush('bank/transactions', {type, amount, desc, date: nowStr(), by: currentUser.username});
+  const newBal = balance + (type==='in' ? amount : -amount);
+  await fbSet('bank/balance', newBal);
+}
+
+window.doDeposit = async function() {
+  const amt  = parseFloat(document.getElementById('depositAmount').value);
+  const desc = document.getElementById('depositDesc').value || 'Deposit';
+  if (!amt||amt<=0) { showMsg('depositError'); return; }
+  await addTx('in', amt, desc);
+  document.getElementById('depositAmount').value = '';
+  document.getElementById('depositDesc').value   = '';
+  showMsg('depositSuccess');
+};
+
+window.doWithdraw = async function() {
+  const amt  = parseFloat(document.getElementById('withdrawAmount').value);
+  const desc = document.getElementById('withdrawDesc').value || 'Withdrawal';
+  if (!amt||amt<=0||amt>balance) { showMsg('withdrawError'); return; }
+  await addTx('out', amt, desc);
+  document.getElementById('withdrawAmount').value = '';
+  document.getElementById('withdrawDesc').value   = '';
+  showMsg('withdrawSuccess');
+};
+
+window.doSend = async function() {
+  const recipient = document.getElementById('sendRecipient').value.trim();
+  const bank_     = document.getElementById('sendBank').value.trim();
+  const acct      = document.getElementById('sendAcct').value.trim();
+  const amt       = parseFloat(document.getElementById('sendAmount').value);
+  const narration = document.getElementById('sendNarration').value||'Transfer';
+  if (!recipient||!bank_||!acct||!amt||amt<=0||amt>balance) { showMsg('sendError'); return; }
+  await addTx('send', amt, `To ${recipient} · ${bank_} · ${acct} · ${narration}`);
+  ['sendRecipient','sendBank','sendAcct','sendAmount','sendNarration'].forEach(id=>document.getElementById(id).value='');
+  showMsg('sendSuccess');
+};
+
+// ── EDIT / DELETE TX (ADMIN ONLY) ─────────────────────────────────────────
+window.openEditModal = function(key) {
+  if (!isAdmin()) return;
+  const tx = transactions[key];
+  if (!tx) return;
+  document.getElementById('editTxKey').value    = key;
+  document.getElementById('editTxAmount').value = tx.amount;
+  document.getElementById('editTxDesc').value   = tx.desc;
+  document.getElementById('editTxType').value   = tx.type;
+  document.getElementById('editModal').classList.add('open');
+};
+window.closeEditModal = () => document.getElementById('editModal').classList.remove('open');
+
+window.saveEdit = async function() {
+  const key    = document.getElementById('editTxKey').value;
+  const amount = parseFloat(document.getElementById('editTxAmount').value);
+  const desc   = document.getElementById('editTxDesc').value.trim();
+  const type   = document.getElementById('editTxType').value;
+  if (!amount||amount<=0||!desc) { showToast('⚠ Fill all fields','#ff4560'); return; }
+  const oldTx     = transactions[key];
+  const oldEffect = oldTx.type==='in'?oldTx.amount:-oldTx.amount;
+  const newEffect = type==='in'?amount:-amount;
+  const newBal    = balance - oldEffect + newEffect;
+  if (newBal < 0) { showToast('⚠ Balance would go negative','#ff4560'); return; }
+  await fbUpdate(`bank/transactions/${key}`, {amount, desc, type});
+  await fbSet('bank/balance', newBal);
+  closeEditModal();
+  showToast('✅ Transaction updated!');
+};
+
+window.deleteTx = async function(key) {
+  if (!isAdmin()) return;
+  if (!confirm('Delete this transaction?')) return;
+  const tx     = transactions[key];
+  const effect = tx.type==='in'?-tx.amount:tx.amount;
+  const newBal = Math.max(0, balance + effect);
+  await fbRemove(`bank/transactions/${key}`);
+  await fbSet('bank/balance', newBal);
+  showToast('🗑 Transaction deleted');
+};
+
+// ── VIRTUAL GENERATOR (ADMIN ONLY) ────────────────────────────────────────
+const SENDERS  = ["PayPal Transfer","Stripe Payment","Wire Transfer","Client Payment","Freelance Income","Investment Return","Bank Transfer","Salary Credit","Bonus Payment","Refund Received","Dividend Payment","Commission Earned","Online Sale","Consulting Fee","Project Payment"];
+const SPENDERS = ["Amazon Purchase","Netflix Subscription","Uber Ride","Grocery Store","Electric Bill","Rent Payment","Phone Bill","Insurance Premium","Online Shopping","Restaurant","Gym Membership","Spotify Premium","Hotel Booking","Flight Ticket","Medical Bill"];
+
+window.generateMoney = async function(amount) {
+  if (!isAdmin()) return;
+  const sender = SENDERS[Math.floor(Math.random()*SENDERS.length)];
+  await addTx('in', amount, sender);
+  showToast(`✅ ${fmt(amount)} received from ${sender}`);
+};
+window.generateRandomTx = async function() {
+  if (!isAdmin()) return;
+  const isIn  = Math.random()>0.4;
+  const amts  = [250,500,750,1000,1500,2000,3000,5000,7500,10000];
+  const amount= amts[Math.floor(Math.random()*amts.length)];
+  if (isIn) {
+    const s = SENDERS[Math.floor(Math.random()*SENDERS.length)];
+    await addTx('in', amount, s);
+    showToast(`✅ ${fmt(amount)} from ${s}`);
+  } else {
+    if (balance<amount) { showToast('⚠ Not enough balance!','#ff4560'); return; }
+    const s = SPENDERS[Math.floor(Math.random()*SPENDERS.length)];
+    await addTx('out', amount, s);
+    showToast(`💸 ${fmt(amount)} on ${s}`);
+  }
+};
+window.generateMultiple = async function() {
+  if (!isAdmin()) return;
+  for (let i=0;i<5;i++) {
+    const isIn  = Math.random()>0.45;
+    const amts  = [100,250,500,1000,2000,3000,5000];
+    const amount= amts[Math.floor(Math.random()*amts.length)];
+    if (isIn) {
+      await addTx('in', amount, SENDERS[Math.floor(Math.random()*SENDERS.length)]);
+    } else if (balance>=amount) {
+      await addTx('out', amount, SPENDERS[Math.floor(Math.random()*SPENDERS.length)]);
+    }
+  }
+  showToast('⚡ 5 transactions generated!');
+};
+
+// ── USER MANAGEMENT (ADMIN ONLY) ─────────────────────────────────────────
+window.createUser = async function() {
+  if (!isAdmin()) return;
+  const username = document.getElementById('newUsername').value.trim().toLowerCase();
+  const password = document.getElementById('newUserPassword').value.trim();
+  const name     = document.getElementById('newUserName').value.trim();
+  const role     = document.getElementById('newUserRole').value;
+  if (!username||!password||!name) { showMsg('createUserError'); return; }
+  const existing = await fbGet(`users/${username}`);
+  if (existing) { showToast('⚠ Username already exists!','#ff4560'); return; }
+  await fbSet(`users/${username}`, { username, password, name, role, createdAt: nowStr() });
+  document.getElementById('newUsername').value      = '';
+  document.getElementById('newUserPassword').value  = '';
+  document.getElementById('newUserName').value      = '';
+  showMsg('createUserSuccess');
+};
+
+window.deleteUser = async function(username) {
+  if (!isAdmin()) return;
+  if (username === 'admin') { showToast('⚠ Cannot delete admin!','#ff4560'); return; }
+  if (!confirm(`Delete user "${username}"?`)) return;
+  await fbRemove(`users/${username}`);
+  showToast(`🗑 User ${username} deleted`);
+};
+
+window.resetUserPassword = async function(username) {
+  if (!isAdmin()) return;
+  const newPw = prompt(`New password for "${username}":`);
+  if (!newPw || newPw.length < 4) { showToast('⚠ Password too short','#ff4560'); return; }
+  await fbUpdate(`users/${username}`, { password: newPw });
+  showToast(`✅ Password updated for ${username}`);
+};
+
+function renderUsersList() {
+  const el = document.getElementById('usersList');
+  if (!el) return;
+  const users = Object.entries(allUsers);
+  if (!users.length) { el.innerHTML = '<div style="color:var(--muted);font-family:\'DM Mono\',monospace;font-size:11px;padding:16px;">No users yet.</div>'; return; }
+  el.innerHTML = users.map(([uid, u]) => `
+    <div class="tx-item" style="flex-wrap:wrap;gap:8px;">
+      <div class="tx-icon ${u.role==='admin'?'send':'in'}">${u.role==='admin'?'👑':'👤'}</div>
+      <div class="tx-info">
+        <div class="tx-desc">${u.name} <span style="color:var(--muted);font-size:11px;">@${u.username}</span></div>
+        <div class="tx-date">${u.role.toUpperCase()} · Created ${u.createdAt||'—'}</div>
+      </div>
+      ${u.username!=='admin'?`
+        <button onclick="resetUserPassword('${u.username}')" style="background:#c8a84b22;border:1px solid #c8a84b55;color:var(--accent);font-family:'DM Mono',monospace;font-size:9px;padding:5px 10px;cursor:pointer;letter-spacing:1px;">RESET PW</button>
+        <button onclick="deleteUser('${u.username}')" style="background:#ff456022;border:1px solid #ff456055;color:var(--red);font-family:'DM Mono',monospace;font-size:9px;padding:5px 10px;cursor:pointer;letter-spacing:1px;">DELETE</button>
+      `:'<span style="font-family:\'DM Mono\',monospace;font-size:9px;color:var(--accent);padding:5px 10px;">PROTECTED</span>'}
+    </div>`).join('');
+}
+
+// ── ADMIN PASSWORD CHANGE ─────────────────────────────────────────────────
+window.changeAdminPassword = async function() {
+  if (!isAdmin()) return;
+  const cur  = document.getElementById('curAdminPw').value;
+  const nw   = document.getElementById('newAdminPw').value;
+  const conf = document.getElementById('confAdminPw').value;
+  const adminData = await fbGet('users/admin');
+  if (cur !== adminData.password || !nw || nw!==conf || nw.length<4) { showMsg('adminPwError'); return; }
+  await fbUpdate('users/admin', { password: nw });
+  ['curAdminPw','newAdminPw','confAdminPw'].forEach(id=>document.getElementById(id).value='');
+  showMsg('adminPwSuccess');
+};
+
+window.clearHistory = async function() {
+  if (!confirm('Clear all transactions?')) return;
+  await fbSet('bank/transactions', {});
+  await fbSet('bank/balance', 0);
+  showToast('🗑 All transactions cleared');
+};
+window.resetBalance = async function() {
+  if (!confirm('Reset balance to $0?')) return;
+  await fbSet('bank/balance', 0);
+  await fbSet('bank/transactions', {});
+  showToast('🔄 Balance reset');
+};
+
+// ── FILTER ────────────────────────────────────────────────────────────────
+window.filterTx = function(type, btn) {
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  const txArr = Object.entries(transactions).map(([k,v])=>({...v,key:k})).reverse();
+  renderTxList('fullTxList', type==='all'?txArr:txArr.filter(t=>t.type===type));
+};
+
+// ── RENDER ────────────────────────────────────────────────────────────────
+function txHTML(tx) {
+  const icons={in:'⬇️',out:'⬆️',send:'↗️'};
+  const sign = tx.type==='in'?'+':'-';
+  const editBtns = isAdmin() ? `
+    <div style="display:flex;flex-direction:column;gap:4px;margin-left:6px;">
+      <button onclick="openEditModal('${tx.key}')" style="background:#c8a84b22;border:1px solid #c8a84b55;color:#c8a84b;font-family:'DM Mono',monospace;font-size:9px;padding:4px 8px;cursor:pointer;">EDIT</button>
+      <button onclick="deleteTx('${tx.key}')" style="background:#ff456022;border:1px solid #ff456055;color:#ff4560;font-family:'DM Mono',monospace;font-size:9px;padding:4px 8px;cursor:pointer;">DEL</button>
+    </div>` : '';
+  return `
+    <div class="tx-item">
+      <div class="tx-icon ${tx.type}">${icons[tx.type]}</div>
+      <div class="tx-info">
+        <div class="tx-desc">${tx.desc}</div>
+        <div class="tx-date">${tx.date||''} ${tx.by?'· @'+tx.by:''}</div>
+      </div>
+      <div class="tx-amount ${tx.type==='in'?'in':'out'}">${sign}${fmt(tx.amount)}</div>
+      ${editBtns}
+    </div>`;
+}
+
+function renderTxList(elId, txArr) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!txArr.length) {
+    el.innerHTML = `<div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:24px;text-align:center;letter-spacing:1px;">No transactions found.</div>`;
+    return;
+  }
+  el.innerHTML = txArr.map(txHTML).join('');
+}
+
+function refreshUI() {
+  const balEl = document.getElementById('balanceDisplay');
+  if (balEl) balEl.textContent = Number(balance).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const txArr = Object.entries(transactions).map(([k,v])=>({...v,key:k})).reverse();
+  const totalIn  = txArr.filter(t=>t.type==='in').reduce((s,t)=>s+t.amount,0);
+  const totalOut = txArr.filter(t=>t.type!=='in').reduce((s,t)=>s+t.amount,0);
+  const tiEl=document.getElementById('totalIn');
+  const toEl=document.getElementById('totalOut');
+  const tcEl=document.getElementById('txCount');
+  if(tiEl) tiEl.textContent=fmt(totalIn);
+  if(toEl) toEl.textContent=fmt(totalOut);
+  if(tcEl) tcEl.textContent=txArr.length;
+  renderTxList('recentTxList', txArr.slice(0,5));
+  renderTxList('fullTxList', txArr);
+  renderUsersList();
+}
+</script>
+
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#04080f;--bg2:#080f1a;--bg3:#0c1522;
+  --border:#1a3050;--border2:#0f2035;
+  --accent:#c8a84b;--accent2:#e8c86a;
+  --green:#00d48a;--red:#ff4560;
+  --text:#e8dfc8;--muted:#5a7090;
+}
+body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;min-height:100vh;overflow-x:hidden;}
+body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:0.4;}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);color:#04080f;font-family:'DM Mono',monospace;font-size:12px;padding:12px 24px;letter-spacing:1px;z-index:999;display:none;border-radius:2px;white-space:nowrap;}
+
+/* LOGIN */
+#loginScreen{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:var(--bg);}
+.login-box{width:min(420px,92vw);background:var(--bg2);border:1px solid var(--border);border-top:3px solid var(--accent);padding:44px 36px;position:relative;animation:fadeUp 0.5s ease;}
+.login-box::before{content:'';position:absolute;top:0;left:50%;transform:translateX(-50%);width:50%;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);}
+.bank-logo{font-family:'Bebas Neue',sans-serif;font-size:36px;letter-spacing:6px;color:var(--accent);text-align:center;margin-bottom:4px;}
+.bank-tagline{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:3px;color:var(--muted);text-align:center;text-transform:uppercase;margin-bottom:36px;}
+.field-label{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-bottom:7px;display:block;}
+.field-input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'Syne',sans-serif;font-size:15px;padding:13px 15px;outline:none;transition:border 0.2s;margin-bottom:16px;}
+.field-input:focus{border-color:var(--accent);}
+select.field-input{cursor:pointer;}
+.btn-primary{width:100%;background:var(--accent);color:#04080f;font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:3px;border:none;padding:15px;cursor:pointer;transition:all 0.2s;}
+.btn-primary:hover{background:var(--accent2);}
+.login-error{color:var(--red);font-family:'DM Mono',monospace;font-size:11px;text-align:center;margin-top:10px;letter-spacing:1px;display:none;}
+
+/* APP */
+#app{display:none;min-height:100vh;position:relative;z-index:1;}
+header{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 20px;display:flex;align-items:center;justify-content:space-between;height:58px;position:sticky;top:0;z-index:50;}
+.header-logo{font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:4px;color:var(--accent);}
+.admin-badge{background:#c8a84b22;border:1px solid #c8a84b55;color:var(--accent);font-family:'DM Mono',monospace;font-size:9px;letter-spacing:2px;padding:3px 9px;display:none;}
+.header-right{display:flex;align-items:center;gap:10px;}
+.user-chip{font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);letter-spacing:1px;}
+.btn-logout{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:2px;padding:7px 13px;cursor:pointer;transition:all 0.2s;}
+.btn-logout:hover{border-color:var(--red);color:var(--red);}
+.nav-tabs{display:flex;border-bottom:1px solid var(--border);background:var(--bg2);padding:0 20px;overflow-x:auto;}
+.nav-tab{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);padding:13px 16px;cursor:pointer;border-bottom:2px solid transparent;transition:all 0.2s;white-space:nowrap;background:none;border-top:none;border-left:none;border-right:none;}
+.nav-tab.active{color:var(--accent);border-bottom-color:var(--accent);}
+main{padding:20px;max-width:860px;margin:0 auto;}
+.page{display:none;}.page.active{display:block;animation:fadeUp 0.35s ease;}
+
+/* BALANCE */
+.balance-card{background:var(--bg2);border:1px solid var(--border);border-top:3px solid var(--accent);padding:28px;margin-bottom:18px;position:relative;overflow:hidden;}
+.balance-card::after{content:'';position:absolute;right:-30px;top:-30px;width:160px;height:160px;border-radius:50%;background:radial-gradient(circle,#c8a84b08,transparent 70%);}
+.balance-label{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-bottom:10px;}
+.balance-amount{font-family:'Bebas Neue',sans-serif;font-size:clamp(42px,8vw,66px);letter-spacing:2px;color:var(--accent);line-height:1;}
+.balance-currency{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-top:5px;letter-spacing:2px;}
+.balance-actions{display:flex;gap:8px;margin-top:20px;flex-wrap:wrap;}
+.btn-action{flex:1;min-width:90px;background:transparent;border:1px solid var(--border);color:var(--text);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:2px;padding:11px 14px;cursor:pointer;transition:all 0.2s;text-transform:uppercase;}
+.btn-action:hover{border-color:var(--accent);color:var(--accent);}
+.btn-action.gold{background:var(--accent);border-color:var(--accent);color:#04080f;}
+.btn-action.gold:hover{background:var(--accent2);}
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:20px;}
+.stat-card{background:var(--bg2);border:1px solid var(--border);padding:16px 18px;}
+.stat-label{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-bottom:7px;}
+.stat-value{font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:1px;}
+.stat-value.green{color:var(--green);}.stat-value.red{color:var(--red);}.stat-value.gold{color:var(--accent);}
+.section-title{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-bottom:10px;}
+.tx-list{display:flex;flex-direction:column;gap:2px;}
+.tx-item{background:var(--bg2);border:1px solid var(--border2);padding:13px 15px;display:flex;align-items:center;gap:10px;transition:border-color 0.2s;}
+.tx-item:hover{border-color:var(--border);}
+.tx-icon{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;}
+.tx-icon.in{background:#00d48a18;border:1px solid #00d48a33;}
+.tx-icon.out{background:#ff456018;border:1px solid #ff456033;}
+.tx-icon.send{background:#c8a84b18;border:1px solid #c8a84b33;}
+.tx-info{flex:1;min-width:0;}
+.tx-desc{font-size:13px;color:var(--text);font-weight:500;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tx-date{font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px;}
+.tx-amount{font-family:'Bebas Neue',sans-serif;font-size:19px;letter-spacing:1px;white-space:nowrap;}
+.tx-amount.in{color:var(--green);}.tx-amount.out{color:var(--red);}
+
+/* GEN */
+.gen-card{background:var(--bg2);border:1px solid var(--border);border-top:2px solid var(--accent);padding:20px;margin-bottom:18px;}
+.gen-btns{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
+.gen-btn{background:transparent;border:1px solid var(--border);color:var(--text);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1px;padding:9px 13px;cursor:pointer;transition:all 0.2s;white-space:nowrap;}
+.gen-btn:hover{border-color:var(--green);color:var(--green);}
+.gen-btn.gold{background:var(--accent);border-color:var(--accent);color:#04080f;}
+.gen-row{display:flex;gap:8px;flex-wrap:wrap;}
+.gen-row .gen-btn{flex:1;min-width:130px;}
+
+/* FORMS */
+.send-card{background:var(--bg2);border:1px solid var(--border);border-top:2px solid var(--accent);padding:26px;margin-bottom:18px;}
+.send-title{font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:3px;color:var(--accent);margin-bottom:18px;}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+@media(max-width:480px){.form-row{grid-template-columns:1fr;}}
+.success-msg{background:#00d48a15;border:1px solid #00d48a44;color:var(--green);font-family:'DM Mono',monospace;font-size:11px;padding:11px 15px;letter-spacing:1px;margin-top:10px;display:none;}
+.error-msg{background:#ff456015;border:1px solid #ff456044;color:var(--red);font-family:'DM Mono',monospace;font-size:11px;padding:11px 15px;letter-spacing:1px;margin-top:10px;display:none;}
+.filter-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;}
+.filter-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:2px;padding:7px 13px;cursor:pointer;text-transform:uppercase;transition:all 0.2s;}
+.filter-btn.active{background:var(--accent);border-color:var(--accent);color:#04080f;}
+.settings-card{background:var(--bg2);border:1px solid var(--border);padding:22px;margin-bottom:12px;}
+.settings-title{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-bottom:16px;}
+.settings-row{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--border2);}
+.settings-row:last-child{border-bottom:none;}
+.settings-key{font-size:13px;color:var(--text);}
+.settings-val{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);}
+
+/* MODAL */
+.modal-overlay{position:fixed;inset:0;background:#00000090;backdrop-filter:blur(4px);z-index:200;display:none;align-items:center;justify-content:center;}
+.modal-overlay.open{display:flex;}
+.modal{background:var(--bg2);border:1px solid var(--border);border-top:2px solid var(--accent);width:min(400px,92vw);padding:28px;position:relative;animation:fadeUp 0.3s ease;}
+.modal-title{font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:3px;color:var(--accent);margin-bottom:18px;}
+.modal-close{position:absolute;top:12px;right:14px;background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;}
+.modal-close:hover{color:var(--red);}
+.modal-actions{display:flex;gap:10px;margin-top:6px;}
+.btn-cancel{flex:1;background:transparent;border:1px solid var(--border);color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:2px;padding:12px;cursor:pointer;text-transform:uppercase;}
+.btn-confirm{flex:2;background:var(--accent);border:none;color:#04080f;font-family:'Bebas Neue',sans-serif;font-size:15px;letter-spacing:3px;padding:12px;cursor:pointer;}
+.btn-confirm:hover{background:var(--accent2);}
+.live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite;margin-right:5px;}
+@keyframes fadeUp{from{opacity:0;transform:translateY(14px);}to{opacity:1;transform:translateY(0);}}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.5;}}
+::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:var(--bg);}::-webkit-scrollbar-thumb{background:var(--border);}
+@media(max-width:580px){main{padding:12px;}header{padding:0 12px;}.nav-tabs{padding:0 10px;}.balance-card{padding:20px;}.login-box{padding:32px 18px;}}
+</style>
+</head>
+<body>
+
+<div id="toast"></div>
+
+<!-- ══ LOGIN ══ -->
+<div id="loginScreen">
+  <div class="login-box">
+    <div class="bank-logo">GlobalBank</div>
+    <div class="bank-tagline">Private · Secure · Synced</div>
+    <label class="field-label">Username</label>
+    <input class="field-input" type="text" id="loginUsername" placeholder="Enter username" autocomplete="username" onkeydown="if(event.key==='Enter')doLogin()"/>
+    <label class="field-label">Password</label>
+    <input class="field-input" type="password" id="loginPassword" placeholder="Enter password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"/>
+    <button class="btn-primary" onclick="doLogin()">ACCESS ACCOUNT</button>
+    <div class="login-error" id="loginError">⚠ Incorrect username or password.</div>
+    <div style="margin-top:20px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px;line-height:1.8;">
+      First time? Login as admin<br/>
+      Username: <span style="color:var(--accent)">admin</span> · Password: <span style="color:var(--accent)">admin9999</span>
+    </div>
+  </div>
+</div>
+
+<!-- ══ APP ══ -->
+<div id="app">
+  <header>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <div class="header-logo">GlobalBank</div>
+      <span class="admin-badge" id="adminBadge">👑 ADMIN</span>
+    </div>
+    <div class="header-right">
+      <div class="user-chip"><span class="live-dot"></span><span id="loggedInName">USER</span></div>
+      <button class="btn-logout" onclick="doLogout()">LOGOUT</button>
+    </div>
+  </header>
+
+  <div class="nav-tabs">
+    <button class="nav-tab active" onclick="showPage('dashboard',this)">Dashboard</button>
+    <button class="nav-tab" onclick="showPage('deposit',this)">Deposit</button>
+    <button class="nav-tab" onclick="showPage('withdraw',this)">Withdraw</button>
+    <button class="nav-tab" onclick="showPage('send',this)">Send</button>
+    <button class="nav-tab" onclick="showPage('history',this)">History</button>
+    <button class="nav-tab" id="adminNavTab" style="display:none;" onclick="showPage('admin',this)">⚙ Admin</button>
+  </div>
+
+  <main>
+
+    <!-- DASHBOARD -->
+    <div class="page active" id="page-dashboard">
+      <div class="balance-card">
+        <div class="balance-label">Total Balance</div>
+        <div class="balance-amount" id="balanceDisplay">0.00</div>
+        <div class="balance-currency">USD · US Dollar</div>
+        <div class="balance-actions">
+          <button class="btn-action gold" onclick="showPage('deposit',document.querySelectorAll('.nav-tab')[1])">+ Deposit</button>
+          <button class="btn-action" onclick="showPage('withdraw',document.querySelectorAll('.nav-tab')[2])">− Withdraw</button>
+          <button class="btn-action" onclick="showPage('send',document.querySelectorAll('.nav-tab')[3])">↗ Send</button>
+        </div>
+      </div>
+      <div class="stats-row">
+        <div class="stat-card"><div class="stat-label">Total In</div><div class="stat-value green" id="totalIn">$0</div></div>
+        <div class="stat-card"><div class="stat-label">Total Out</div><div class="stat-value red" id="totalOut">$0</div></div>
+        <div class="stat-card"><div class="stat-label">Transactions</div><div class="stat-value gold" id="txCount">0</div></div>
+      </div>
+
+      <!-- ADMIN ONLY: Generator -->
+      <div id="generatorSection" style="display:none;">
+        <div class="section-title">⚡ Virtual Generator</div>
+        <div class="gen-card">
+          <div class="gen-btns">
+            <button class="gen-btn" onclick="generateMoney(1000)">+$1K</button>
+            <button class="gen-btn" onclick="generateMoney(5000)">+$5K</button>
+            <button class="gen-btn" onclick="generateMoney(10000)">+$10K</button>
+            <button class="gen-btn" onclick="generateMoney(50000)">+$50K</button>
+            <button class="gen-btn gold" onclick="generateMoney(100000)">+$100K</button>
+          </div>
+          <div class="gen-row">
+            <button class="gen-btn" onclick="generateRandomTx()">🎲 Random</button>
+            <button class="gen-btn" onclick="generateMultiple()">⚡ Generate ×5</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-title">Recent Transactions</div>
+      <div class="tx-list" id="recentTxList">
+        <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:24px;text-align:center;">No transactions yet.</div>
+      </div>
+    </div>
+
+    <!-- DEPOSIT -->
+    <div class="page" id="page-deposit">
+      <div class="send-card">
+        <div class="send-title">Deposit Funds</div>
+        <label class="field-label">Amount ($)</label>
+        <input class="field-input" type="number" id="depositAmount" placeholder="e.g. 5000" min="1"/>
+        <label class="field-label">Description (optional)</label>
+        <input class="field-input" type="text" id="depositDesc" placeholder="e.g. Salary, Transfer in..."/>
+        <button class="btn-primary" onclick="doDeposit()">DEPOSIT FUNDS</button>
+        <div class="success-msg" id="depositSuccess">✅ Deposit successful!</div>
+        <div class="error-msg" id="depositError">⚠ Please enter a valid amount.</div>
+      </div>
+    </div>
+
+    <!-- WITHDRAW -->
+    <div class="page" id="page-withdraw">
+      <div class="send-card">
+        <div class="send-title">Withdraw Funds</div>
+        <label class="field-label">Amount ($)</label>
+        <input class="field-input" type="number" id="withdrawAmount" placeholder="e.g. 2000" min="1"/>
+        <label class="field-label">Description (optional)</label>
+        <input class="field-input" type="text" id="withdrawDesc" placeholder="e.g. ATM withdrawal..."/>
+        <button class="btn-primary" onclick="doWithdraw()">WITHDRAW FUNDS</button>
+        <div class="success-msg" id="withdrawSuccess">✅ Withdrawal successful!</div>
+        <div class="error-msg" id="withdrawError">⚠ Insufficient balance or invalid amount.</div>
+      </div>
+    </div>
+
+    <!-- SEND -->
+    <div class="page" id="page-send">
+      <div class="send-card">
+        <div class="send-title">Send Money</div>
+        <label class="field-label">Recipient Name</label>
+        <input class="field-input" type="text" id="sendRecipient" placeholder="e.g. John Doe"/>
+        <div class="form-row">
+          <div>
+            <label class="field-label">Bank</label>
+            <input class="field-input" type="text" id="sendBank" placeholder="e.g. GTBank"/>
+          </div>
+          <div>
+            <label class="field-label">Account Number</label>
+            <input class="field-input" type="text" id="sendAcct" placeholder="0123456789"/>
+          </div>
+        </div>
+        <label class="field-label">Amount ($)</label>
+        <input class="field-input" type="number" id="sendAmount" placeholder="e.g. 1000" min="1"/>
+        <label class="field-label">Narration</label>
+        <input class="field-input" type="text" id="sendNarration" placeholder="e.g. For rent..."/>
+        <button class="btn-primary" onclick="doSend()">SEND MONEY</button>
+        <div class="success-msg" id="sendSuccess">✅ Transfer successful!</div>
+        <div class="error-msg" id="sendError">⚠ Fill all fields and check balance.</div>
+      </div>
+    </div>
+
+    <!-- HISTORY -->
+    <div class="page" id="page-history">
+      <div class="filter-row">
+        <button class="filter-btn active" onclick="filterTx('all',this)">All</button>
+        <button class="filter-btn" onclick="filterTx('in',this)">Money In</button>
+        <button class="filter-btn" onclick="filterTx('out',this)">Money Out</button>
+        <button class="filter-btn" onclick="filterTx('send',this)">Transfers</button>
+      </div>
+      <div class="tx-list" id="fullTxList">
+        <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:24px;text-align:center;">No transactions yet.</div>
+      </div>
+    </div>
+
+    <!-- ADMIN PANEL -->
+    <div class="page" id="page-admin">
+
+      <!-- Create User -->
+      <div class="send-card">
+        <div class="send-title">Create New User</div>
+        <div class="form-row">
+          <div>
+            <label class="field-label">Full Name</label>
+            <input class="field-input" type="text" id="newUserName" placeholder="e.g. John Doe"/>
+          </div>
+          <div>
+            <label class="field-label">Username</label>
+            <input class="field-input" type="text" id="newUsername" placeholder="e.g. johndoe"/>
+          </div>
+        </div>
+        <div class="form-row">
+          <div>
+            <label class="field-label">Password</label>
+            <input class="field-input" type="text" id="newUserPassword" placeholder="Set password"/>
+          </div>
+          <div>
+            <label class="field-label">Role</label>
+            <select class="field-input" id="newUserRole">
+              <option value="user">Regular User</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+        </div>
+        <button class="btn-primary" onclick="createUser()">CREATE USER</button>
+        <div class="success-msg" id="createUserSuccess">✅ User created successfully!</div>
+        <div class="error-msg" id="createUserError">⚠ Fill all fields. Username may already exist.</div>
+      </div>
+
+      <!-- Users List -->
+      <div class="section-title">All Users</div>
+      <div class="tx-list" id="usersList" style="margin-bottom:24px;">
+        <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:20px;text-align:center;">Loading users...</div>
+      </div>
+
+      <!-- Admin Settings -->
+      <div id="adminSettingsSection">
+        <div class="settings-card">
+          <div class="settings-title">Change Admin Password</div>
+          <label class="field-label">Current Admin Password</label>
+          <input class="field-input" type="password" id="curAdminPw" placeholder="Current password"/>
+          <label class="field-label">New Password</label>
+          <input class="field-input" type="password" id="newAdminPw" placeholder="New password"/>
+          <label class="field-label">Confirm New Password</label>
+          <input class="field-input" type="password" id="confAdminPw" placeholder="Confirm" style="margin-bottom:14px;"/>
+          <button class="btn-primary" onclick="changeAdminPassword()">UPDATE ADMIN PASSWORD</button>
+          <div class="success-msg" id="adminPwSuccess">✅ Admin password updated!</div>
+          <div class="error-msg" id="adminPwError">⚠ Check passwords and try again.</div>
+        </div>
+
+        <div class="settings-card">
+          <div class="settings-title">Danger Zone</div>
+          <div class="settings-row">
+            <span class="settings-key">Clear All Transactions</span>
+            <button class="btn-action" style="flex:0;padding:7px 13px;font-size:10px;" onclick="clearHistory()">CLEAR</button>
+          </div>
+          <div class="settings-row">
+            <span class="settings-key">Reset Balance to $0</span>
+            <button class="btn-action" style="flex:0;padding:7px 13px;font-size:10px;border-color:var(--red);color:var(--red);" onclick="resetBalance()">RESET</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- EDIT MODAL -->
+<div class="modal-overlay" id="editModal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeEditModal()">✕</button>
+    <div class="modal-title">Edit Transaction</div>
+    <input type="hidden" id="editTxKey"/>
+    <label class="field-label">Type</label>
+    <select class="field-input" id="editTxType">
+      <option value="in">Money In</option>
+      <option value="out">Money Out</option>
+      <option value="send">Transfer</option>
+    </select>
+    <label class="field-label">Amount ($)</label>
+    <input class="field-input" type="number" id="editTxAmount" placeholder="Amount" min="1"/>
+    <label class="field-label">Description</label>
+    <input class="field-input" type="text" id="editTxDesc" placeholder="Description"/>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeEditModal()">CANCEL</button>
+      <button class="btn-confirm" onclick="saveEdit()">SAVE</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
