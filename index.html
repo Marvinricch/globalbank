@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>GlobalBank — Private</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Syne:wght@400;500;600;700&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#04080f;
+  --bg2:#080f1a;
+  --bg3:#0c1522;
+  --card:#0f1c2e;
+  --border:#1a3050;
+  --accent:#c8a84b;
+  --accent2:#e8c86a;
+  --accentd:#8a6e28;
+  --green:#00d48a;
+  --red:#ff4560;
+  --text:#e8dfc8;
+  --muted:#5a7090;
+  --muted2:#3a5070;
+}
+body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;min-height:100vh;overflow-x:hidden;}
+
+/* ── NOISE OVERLAY ── */
+body::before{
+  content:'';position:fixed;inset:0;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  pointer-events:none;z-index:0;opacity:0.4;
+}
+
+/* ── GOLD LINES ── */
+.gold-line{position:fixed;background:linear-gradient(90deg,transparent,var(--accent),transparent);height:1px;width:100%;opacity:0.15;}
+.gold-line.top{top:0;}
+.gold-line.bottom{bottom:0;}
+
+/* ── LOGIN SCREEN ── */
+#loginScreen{
+  position:fixed;inset:0;z-index:100;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--bg);
+}
+.login-box{
+  width:min(420px,90vw);
+  background:var(--bg2);
+  border:1px solid var(--border);
+  border-top:2px solid var(--accent);
+  padding:48px 40px;
+  position:relative;
+  animation:fadeUp 0.6s ease forwards;
+}
+.login-box::before{
+  content:'';position:absolute;top:0;left:50%;transform:translateX(-50%);
+  width:60%;height:2px;
+  background:linear-gradient(90deg,transparent,var(--accent),transparent);
+}
+.bank-logo{
+  font-family:'Bebas Neue',sans-serif;
+  font-size:38px;letter-spacing:6px;
+  color:var(--accent);text-align:center;margin-bottom:4px;
+}
+.bank-tagline{
+  font-family:'DM Mono',monospace;font-size:10px;
+  letter-spacing:3px;color:var(--muted);text-align:center;
+  text-transform:uppercase;margin-bottom:40px;
+}
+.field-label{
+  font-family:'DM Mono',monospace;font-size:10px;
+  letter-spacing:2px;color:var(--muted);text-transform:uppercase;
+  margin-bottom:8px;display:block;
+}
+.field-input{
+  width:100%;background:var(--bg3);
+  border:1px solid var(--border);border-radius:2px;
+  color:var(--text);font-family:'Syne',sans-serif;font-size:15px;
+  padding:14px 16px;outline:none;transition:border 0.2s;margin-bottom:20px;
+}
+.field-input:focus{border-color:var(--accent);}
+.btn-primary{
+  width:100%;background:var(--accent);color:#04080f;
+  font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:3px;
+  border:none;padding:16px;cursor:pointer;transition:all 0.2s;
+  border-radius:2px;
+}
+.btn-primary:hover{background:var(--accent2);transform:translateY(-1px);}
+.login-error{
+  color:var(--red);font-family:'DM Mono',monospace;font-size:11px;
+  text-align:center;margin-top:12px;letter-spacing:1px;display:none;
+}
+
+/* ── MAIN APP ── */
+#app{display:none;min-height:100vh;position:relative;z-index:1;}
+
+/* ── HEADER ── */
+header{
+  background:var(--bg2);border-bottom:1px solid var(--border);
+  padding:0 32px;display:flex;align-items:center;justify-content:space-between;
+  height:64px;position:sticky;top:0;z-index:50;
+}
+.header-logo{font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:4px;color:var(--accent);}
+.header-right{display:flex;align-items:center;gap:20px;}
+.account-badge{
+  font-family:'DM Mono',monospace;font-size:11px;
+  color:var(--muted);letter-spacing:1px;
+}
+.btn-logout{
+  background:transparent;border:1px solid var(--border);
+  color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;
+  letter-spacing:2px;padding:8px 16px;cursor:pointer;transition:all 0.2s;
+  text-transform:uppercase;
+}
+.btn-logout:hover{border-color:var(--red);color:var(--red);}
+
+/* ── NAV TABS ── */
+.nav-tabs{
+  display:flex;gap:0;border-bottom:1px solid var(--border);
+  background:var(--bg2);padding:0 32px;overflow-x:auto;
+}
+.nav-tab{
+  font-family:'DM Mono',monospace;font-size:11px;letter-spacing:2px;
+  text-transform:uppercase;color:var(--muted);padding:16px 24px;
+  cursor:pointer;border-bottom:2px solid transparent;transition:all 0.2s;
+  white-space:nowrap;background:none;border-top:none;border-left:none;border-right:none;
+}
+.nav-tab.active{color:var(--accent);border-bottom-color:var(--accent);}
+.nav-tab:hover:not(.active){color:var(--text);}
+
+/* ── MAIN CONTENT ── */
+main{padding:32px;max-width:900px;margin:0 auto;}
+.page{display:none;}
+.page.active{display:block;animation:fadeUp 0.4s ease;}
+
+/* ── BALANCE CARD ── */
+.balance-card{
+  background:var(--bg2);border:1px solid var(--border);
+  border-top:3px solid var(--accent);padding:40px;
+  margin-bottom:24px;position:relative;overflow:hidden;
+}
+.balance-card::after{
+  content:'';position:absolute;right:-40px;top:-40px;
+  width:200px;height:200px;border-radius:50%;
+  background:radial-gradient(circle,var(--accent)05,transparent 70%);
+}
+.balance-label{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-bottom:12px;}
+.balance-amount{font-family:'Bebas Neue',sans-serif;font-size:clamp(48px,8vw,72px);letter-spacing:2px;color:var(--accent);line-height:1;}
+.balance-currency{font-family:'DM Mono',monospace;font-size:14px;color:var(--muted);margin-top:6px;letter-spacing:2px;}
+.balance-actions{display:flex;gap:12px;margin-top:32px;flex-wrap:wrap;}
+
+.btn-action{
+  flex:1;min-width:120px;
+  background:transparent;border:1px solid var(--border);
+  color:var(--text);font-family:'DM Mono',monospace;font-size:11px;
+  letter-spacing:2px;padding:14px 20px;cursor:pointer;transition:all 0.2s;
+  text-transform:uppercase;
+}
+.btn-action:hover{border-color:var(--accent);color:var(--accent);}
+.btn-action.gold{background:var(--accent);border-color:var(--accent);color:#04080f;font-weight:600;}
+.btn-action.gold:hover{background:var(--accent2);}
+
+/* ── STATS ROW ── */
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:32px;}
+.stat-card{background:var(--bg2);border:1px solid var(--border);padding:20px 24px;}
+.stat-label{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;}
+.stat-value{font-family:'Bebas Neue',sans-serif;font-size:28px;letter-spacing:1px;}
+.stat-value.green{color:var(--green);}
+.stat-value.red{color:var(--red);}
+.stat-value.gold{color:var(--accent);}
+
+/* ── RECENT TRANSACTIONS ── */
+.section-title{
+  font-family:'DM Mono',monospace;font-size:10px;letter-spacing:3px;
+  color:var(--muted);text-transform:uppercase;margin-bottom:16px;
+}
+.tx-list{display:flex;flex-direction:column;gap:2px;}
+.tx-item{
+  background:var(--bg2);border:1px solid var(--border2);
+  padding:16px 20px;display:flex;align-items:center;gap:16px;
+  transition:border-color 0.2s;
+}
+.tx-item:hover{border-color:var(--border);}
+.tx-icon{
+  width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:16px;flex-shrink:0;
+}
+.tx-icon.in{background:#00d48a18;border:1px solid #00d48a33;}
+.tx-icon.out{background:#ff456018;border:1px solid #ff456033;}
+.tx-icon.send{background:#c8a84b18;border:1px solid #c8a84b33;}
+.tx-info{flex:1;}
+.tx-desc{font-size:14px;color:var(--text);font-weight:500;margin-bottom:2px;}
+.tx-date{font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);letter-spacing:1px;}
+.tx-amount{font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:1px;}
+.tx-amount.in{color:var(--green);}
+.tx-amount.out{color:var(--red);}
+
+/* ── MODAL ── */
+.modal-overlay{
+  position:fixed;inset:0;background:#00000088;backdrop-filter:blur(4px);
+  z-index:200;display:none;align-items:center;justify-content:center;
+}
+.modal-overlay.open{display:flex;}
+.modal{
+  background:var(--bg2);border:1px solid var(--border);border-top:2px solid var(--accent);
+  width:min(440px,92vw);padding:36px;position:relative;animation:fadeUp 0.3s ease;
+}
+.modal-title{font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:3px;color:var(--accent);margin-bottom:24px;}
+.modal-close{
+  position:absolute;top:16px;right:16px;background:none;border:none;
+  color:var(--muted);font-size:20px;cursor:pointer;
+}
+.modal-close:hover{color:var(--red);}
+.input-group{margin-bottom:20px;}
+.modal-actions{display:flex;gap:12px;margin-top:8px;}
+.btn-cancel{
+  flex:1;background:transparent;border:1px solid var(--border);
+  color:var(--muted);font-family:'DM Mono',monospace;font-size:11px;
+  letter-spacing:2px;padding:14px;cursor:pointer;text-transform:uppercase;
+}
+.btn-cancel:hover{border-color:var(--red);color:var(--red);}
+.btn-confirm{
+  flex:2;background:var(--accent);border:none;color:#04080f;
+  font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:3px;
+  padding:14px;cursor:pointer;transition:all 0.2s;
+}
+.btn-confirm:hover{background:var(--accent2);}
+.success-msg{
+  background:#00d48a15;border:1px solid #00d48a44;
+  color:var(--green);font-family:'DM Mono',monospace;font-size:12px;
+  padding:12px 16px;letter-spacing:1px;margin-top:12px;display:none;
+}
+.error-msg{
+  background:#ff456015;border:1px solid #ff456044;
+  color:var(--red);font-family:'DM Mono',monospace;font-size:12px;
+  padding:12px 16px;letter-spacing:1px;margin-top:12px;display:none;
+}
+
+/* ── SEND PAGE ── */
+.send-card{background:var(--bg2);border:1px solid var(--border);border-top:2px solid var(--accent);padding:32px;margin-bottom:24px;}
+.send-title{font-family:'Bebas Neue',sans-serif;font-size:28px;letter-spacing:3px;color:var(--accent);margin-bottom:24px;}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+@media(max-width:560px){.form-row{grid-template-columns:1fr;}}
+
+/* ── HISTORY PAGE ── */
+.filter-row{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;}
+.filter-btn{
+  background:transparent;border:1px solid var(--border);
+  color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;
+  letter-spacing:2px;padding:8px 16px;cursor:pointer;text-transform:uppercase;transition:all 0.2s;
+}
+.filter-btn.active{background:var(--accent);border-color:var(--accent);color:#04080f;}
+.filter-btn:hover:not(.active){border-color:var(--accent);color:var(--accent);}
+
+/* ── SETTINGS PAGE ── */
+.settings-card{background:var(--bg2);border:1px solid var(--border);padding:28px;margin-bottom:16px;}
+.settings-title{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-bottom:20px;}
+.settings-row{display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-bottom:1px solid var(--border2);}
+.settings-row:last-child{border-bottom:none;}
+.settings-key{font-size:14px;color:var(--text);}
+.settings-val{font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);}
+
+/* ── ANIMATIONS ── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.5;}}
+.live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite;margin-right:6px;}
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-track{background:var(--bg);}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
+
+/* ── ACCOUNT NUMBER ── */
+.acct-chip{
+  display:inline-flex;align-items:center;gap:8px;
+  background:var(--bg3);border:1px solid var(--border);
+  font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);
+  padding:6px 14px;letter-spacing:2px;margin-top:12px;cursor:pointer;
+}
+.acct-chip:hover{border-color:var(--accent);color:var(--accent);}
+
+@media(max-width:600px){
+  main{padding:16px;}
+  header{padding:0 16px;}
+  .nav-tabs{padding:0 16px;}
+  .balance-card{padding:24px;}
+  .login-box{padding:36px 24px;}
+}
+</style>
+</head>
+<body>
+
+<div class="gold-line top"></div>
+<div class="gold-line bottom"></div>
+
+<!-- ══ LOGIN SCREEN ══ -->
+<div id="loginScreen">
+  <div class="login-box">
+    <div class="bank-logo">GlobalBank</div>
+    <div class="bank-tagline">Private · Secure · Personal</div>
+    <label class="field-label">Account PIN / Password</label>
+    <input class="field-input" type="password" id="pinInput" placeholder="Enter your password" onkeydown="if(event.key==='Enter')doLogin()"/>
+    <button class="btn-primary" onclick="doLogin()">ACCESS ACCOUNT</button>
+    <div class="login-error" id="loginError">⚠ Incorrect password. Try again.</div>
+
+  </div>
+</div>
+
+<!-- ══ MAIN APP ══ -->
+<div id="app">
+  <header>
+    <div class="header-logo">GlobalBank</div>
+    <div class="header-right">
+      <div class="account-badge"><span class="live-dot"></span>ONLINE</div>
+      <button class="btn-logout" onclick="doLogout()">LOGOUT</button>
+    </div>
+  </header>
+
+  <div class="nav-tabs">
+    <button class="nav-tab active" onclick="showPage('dashboard',this)">Dashboard</button>
+    <button class="nav-tab" onclick="showPage('deposit',this)">Deposit</button>
+    <button class="nav-tab" onclick="showPage('withdraw',this)">Withdraw</button>
+    <button class="nav-tab" onclick="showPage('send',this)">Send Money</button>
+    <button class="nav-tab" onclick="showPage('history',this)">History</button>
+    <button class="nav-tab" onclick="showPage('settings',this)">Settings</button>
+  </div>
+
+  <main>
+
+    <!-- ── DASHBOARD ── -->
+    <div class="page active" id="page-dashboard">
+      <div class="balance-card">
+        <div class="balance-label">Total Balance</div>
+        <div class="balance-amount" id="balanceDisplay">0.00</div>
+        <div class="balance-currency">USD · US Dollar</div>
+        <div class="acct-chip" onclick="copyAcct()" title="Click to copy">
+          📋 ACC: <span id="acctNo">7401-2938-56</span>
+        </div>
+        <div class="balance-actions">
+          <button class="btn-action gold" onclick="showPage('deposit',document.querySelectorAll('.nav-tab')[1])">+ Deposit</button>
+          <button class="btn-action" onclick="showPage('withdraw',document.querySelectorAll('.nav-tab')[2])">− Withdraw</button>
+          <button class="btn-action" onclick="showPage('send',document.querySelectorAll('.nav-tab')[3])">↗ Send</button>
+        </div>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-card">
+          <div class="stat-label">Total In</div>
+          <div class="stat-value green" id="totalIn">$0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Total Out</div>
+          <div class="stat-value red" id="totalOut">$0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Transactions</div>
+          <div class="stat-value gold" id="txCount">0</div>
+        </div>
+      </div>
+
+      <div class="section-title">Virtual Money Generator</div>
+      <div style="background:var(--bg2);border:1px solid var(--border);border-top:2px solid var(--accent);padding:24px;margin-bottom:24px;">
+        <div style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);letter-spacing:2px;margin-bottom:16px;">SIMULATE INCOMING TRANSACTIONS</div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+          <button class="btn-action" onclick="generateMoney(1000)" style="flex:0;white-space:nowrap;">+ $1,000</button>
+          <button class="btn-action" onclick="generateMoney(5000)" style="flex:0;white-space:nowrap;">+ $5,000</button>
+          <button class="btn-action" onclick="generateMoney(10000)" style="flex:0;white-space:nowrap;">+ $10,000</button>
+          <button class="btn-action" onclick="generateMoney(50000)" style="flex:0;white-space:nowrap;">+ $50,000</button>
+          <button class="btn-action gold" onclick="generateMoney(100000)" style="flex:0;white-space:nowrap;">+ $100,000</button>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <button class="btn-action" onclick="generateRandomTx()" style="flex:1;min-width:140px;">🎲 Random Transaction</button>
+          <button class="btn-action" onclick="generateMultiple()" style="flex:1;min-width:140px;">⚡ Generate 5 Transactions</button>
+        </div>
+        <div id="genMsg" style="display:none;margin-top:12px;font-family:'DM Mono',monospace;font-size:11px;color:var(--accent2);letter-spacing:1px;"></div>
+      </div>
+
+      <div class="section-title">Recent Transactions</div>
+      <div class="tx-list" id="recentTxList">
+        <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:24px;text-align:center;letter-spacing:1px;">
+          No transactions yet. Make your first deposit!
+        </div>
+      </div>
+    </div>
+
+    <!-- ── DEPOSIT ── -->
+    <div class="page" id="page-deposit">
+      <div class="send-card">
+        <div class="send-title">Deposit Funds</div>
+        <div class="input-group">
+          <label class="field-label">Amount ($)</label>
+          <input class="field-input" type="number" id="depositAmount" placeholder="e.g. 50000" min="1"/>
+        </div>
+        <div class="input-group">
+          <label class="field-label">Description (optional)</label>
+          <input class="field-input" type="text" id="depositDesc" placeholder="e.g. Salary, Transfer in..."/>
+        </div>
+        <button class="btn-primary" onclick="doDeposit()">DEPOSIT FUNDS</button>
+        <div class="success-msg" id="depositSuccess">✅ Deposit successful!</div>
+        <div class="error-msg" id="depositError">⚠ Please enter a valid amount.</div>
+      </div>
+    </div>
+
+    <!-- ── WITHDRAW ── -->
+    <div class="page" id="page-withdraw">
+      <div class="send-card">
+        <div class="send-title">Withdraw Funds</div>
+        <div class="input-group">
+          <label class="field-label">Amount ($)</label>
+          <input class="field-input" type="number" id="withdrawAmount" placeholder="e.g. 20000" min="1"/>
+        </div>
+        <div class="input-group">
+          <label class="field-label">Description (optional)</label>
+          <input class="field-input" type="text" id="withdrawDesc" placeholder="e.g. ATM withdrawal, Bills..."/>
+        </div>
+        <button class="btn-primary" onclick="doWithdraw()">WITHDRAW FUNDS</button>
+        <div class="success-msg" id="withdrawSuccess">✅ Withdrawal successful!</div>
+        <div class="error-msg" id="withdrawError">⚠ Insufficient balance or invalid amount.</div>
+      </div>
+    </div>
+
+    <!-- ── SEND MONEY ── -->
+    <div class="page" id="page-send">
+      <div class="send-card">
+        <div class="send-title">Send Money</div>
+        <div class="input-group">
+          <label class="field-label">Recipient Name</label>
+          <input class="field-input" type="text" id="sendRecipient" placeholder="e.g. John Doe"/>
+        </div>
+        <div class="form-row">
+          <div class="input-group">
+            <label class="field-label">Bank</label>
+            <input class="field-input" type="text" id="sendBank" placeholder="e.g. GTBank"/>
+          </div>
+          <div class="input-group">
+            <label class="field-label">Account Number</label>
+            <input class="field-input" type="text" id="sendAcct" placeholder="0123456789"/>
+          </div>
+        </div>
+        <div class="input-group">
+          <label class="field-label">Amount ($)</label>
+          <input class="field-input" type="number" id="sendAmount" placeholder="e.g. 10000" min="1"/>
+        </div>
+        <div class="input-group">
+          <label class="field-label">Narration</label>
+          <input class="field-input" type="text" id="sendNarration" placeholder="e.g. For rent, Payment..."/>
+        </div>
+        <button class="btn-primary" onclick="doSend()">SEND MONEY</button>
+        <div class="success-msg" id="sendSuccess">✅ Transfer successful!</div>
+        <div class="error-msg" id="sendError">⚠ Please fill all fields and check your balance.</div>
+      </div>
+    </div>
+
+    <!-- ── HISTORY ── -->
+    <div class="page" id="page-history">
+      <div class="filter-row">
+        <button class="filter-btn active" onclick="filterTx('all',this)">All</button>
+        <button class="filter-btn" onclick="filterTx('in',this)">Money In</button>
+        <button class="filter-btn" onclick="filterTx('out',this)">Money Out</button>
+        <button class="filter-btn" onclick="filterTx('send',this)">Transfers</button>
+      </div>
+      <div class="tx-list" id="fullTxList">
+        <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:24px;text-align:center;letter-spacing:1px;">
+          No transactions yet.
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SETTINGS ── -->
+    <div class="page" id="page-settings">
+      <div class="settings-card">
+        <div class="settings-title">Account Info</div>
+        <div class="settings-row">
+          <span class="settings-key">Account Name</span>
+          <span class="settings-val">GLOBAL BANK</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-key">Account Number</span>
+          <span class="settings-val" id="acctDisplay">7401-2938-56</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-key">Currency</span>
+          <span class="settings-val">USD ($)</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-key">Account Type</span>
+          <span class="settings-val">PRIVATE</span>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <div class="settings-title">Change Password</div>
+        <label class="field-label">Current Password</label>
+        <input class="field-input" type="password" id="currentPw" placeholder="Enter current password" style="margin-bottom:16px;"/>
+        <label class="field-label">New Password</label>
+        <input class="field-input" type="password" id="newPw" placeholder="Enter new password" style="margin-bottom:16px;"/>
+        <label class="field-label">Confirm New Password</label>
+        <input class="field-input" type="password" id="confirmPw" placeholder="Confirm new password" style="margin-bottom:20px;"/>
+        <button class="btn-primary" onclick="changePassword()">UPDATE PASSWORD</button>
+        <div class="success-msg" id="pwSuccess" style="margin-top:12px;">✅ Password updated successfully!</div>
+        <div class="error-msg" id="pwError" style="margin-top:12px;">⚠ Check your passwords and try again.</div>
+      </div>
+
+      <div class="settings-card">
+        <div class="settings-title">Danger Zone</div>
+        <div class="settings-row">
+          <span class="settings-key">Clear All Transactions</span>
+          <button class="btn-action" style="flex:0;padding:8px 16px;font-size:10px;" onclick="clearHistory()">CLEAR</button>
+        </div>
+        <div class="settings-row">
+          <span class="settings-key">Reset Balance to Zero</span>
+          <button class="btn-action" style="flex:0;padding:8px 16px;font-size:10px;border-color:var(--red);color:var(--red);" onclick="resetBalance()">RESET</button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// ── STATE ──────────────────────────────────────────────────────────────────
+let STATE = {
+  balance: 0,
+  transactions: [],
+  password: 'marvin2026',
+};
+
+function saveState() {
+  localStorage.setItem('globalbank', JSON.stringify(STATE));
+}
+
+function loadState() {
+  const saved = localStorage.getItem('globalbank');
+  if (saved) STATE = JSON.parse(saved);
+}
+
+// ── LOGIN ──────────────────────────────────────────────────────────────────
+function doLogin() {
+  loadState();
+  const pin = document.getElementById('pinInput').value;
+  // Always ensure a default password exists
+  if (!STATE.password) {
+    STATE.password = 'globalbank2026';
+    saveState();
+  }
+  // Master reset code - clears everything and resets password
+  if (pin === 'RESETALL') {
+    localStorage.removeItem('globalbank');
+    STATE = { balance: 0, transactions: [], password: 'globalbank2026' };
+    saveState();
+    alert('✅ Reset complete! Your password is now: globalbank2026');
+    document.getElementById('pinInput').value = '';
+    return;
+  }
+  if (pin === STATE.password) {
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    refreshUI();
+  } else {
+    const err = document.getElementById('loginError');
+    err.style.display = 'block';
+    setTimeout(() => err.style.display = 'none', 3000);
+    document.getElementById('pinInput').value = '';
+  }
+}
+
+function doLogout() {
+  saveState();
+  document.getElementById('loginScreen').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('pinInput').value = '';
+}
+
+// ── NAVIGATION ────────────────────────────────────────────────────────────
+function showPage(id, tabEl) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-' + id).classList.add('active');
+  if (tabEl) tabEl.classList.add('active');
+  // Clear messages
+  document.querySelectorAll('.success-msg,.error-msg').forEach(el => el.style.display = 'none');
+  refreshUI();
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────────────
+function fmt(n) {
+  return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+function now() {
+  return new Date().toLocaleString('en-GB', {day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+}
+
+function addTx(type, amount, desc) {
+  STATE.transactions.unshift({type, amount, desc, date: now(), id: Date.now()});
+  saveState();
+  refreshUI();
+}
+
+function showMsg(id, isSuccess) {
+  const el = document.getElementById(id);
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 3000);
+}
+
+function copyAcct() {
+  navigator.clipboard?.writeText('7401293856');
+  document.querySelector('.acct-chip').innerHTML = '✅ Copied!';
+  setTimeout(() => document.querySelector('.acct-chip').innerHTML = '📋 ACC: <span id="acctNo">7401-2938-56</span>', 2000);
+}
+
+// ── DEPOSIT ───────────────────────────────────────────────────────────────
+function doDeposit() {
+  const amt = parseFloat(document.getElementById('depositAmount').value);
+  const desc = document.getElementById('depositDesc').value || 'Deposit';
+  if (!amt || amt <= 0) { showMsg('depositError'); return; }
+  STATE.balance += amt;
+  addTx('in', amt, desc);
+  document.getElementById('depositAmount').value = '';
+  document.getElementById('depositDesc').value = '';
+  showMsg('depositSuccess', true);
+}
+
+// ── WITHDRAW ──────────────────────────────────────────────────────────────
+function doWithdraw() {
+  const amt = parseFloat(document.getElementById('withdrawAmount').value);
+  const desc = document.getElementById('withdrawDesc').value || 'Withdrawal';
+  if (!amt || amt <= 0 || amt > STATE.balance) { showMsg('withdrawError'); return; }
+  STATE.balance -= amt;
+  addTx('out', amt, desc);
+  document.getElementById('withdrawAmount').value = '';
+  document.getElementById('withdrawDesc').value = '';
+  showMsg('withdrawSuccess', true);
+}
+
+// ── SEND ──────────────────────────────────────────────────────────────────
+function doSend() {
+  const recipient = document.getElementById('sendRecipient').value.trim();
+  const bank = document.getElementById('sendBank').value.trim();
+  const acct = document.getElementById('sendAcct').value.trim();
+  const amt = parseFloat(document.getElementById('sendAmount').value);
+  const narration = document.getElementById('sendNarration').value || 'Transfer';
+  if (!recipient || !bank || !acct || !amt || amt <= 0 || amt > STATE.balance) {
+    showMsg('sendError'); return;
+  }
+  STATE.balance -= amt;
+  addTx('send', amt, `To ${recipient} · ${bank} · ${acct} · ${narration}`);
+  document.getElementById('sendRecipient').value = '';
+  document.getElementById('sendBank').value = '';
+  document.getElementById('sendAcct').value = '';
+  document.getElementById('sendAmount').value = '';
+  document.getElementById('sendNarration').value = '';
+  showMsg('sendSuccess', true);
+}
+
+// ── PASSWORD ──────────────────────────────────────────────────────────────
+function changePassword() {
+  const cur = document.getElementById('currentPw').value;
+  const nw = document.getElementById('newPw').value;
+  const conf = document.getElementById('confirmPw').value;
+  if (cur !== STATE.password || !nw || nw !== conf || nw.length < 4) {
+    showMsg('pwError'); return;
+  }
+  STATE.password = nw;
+  saveState();
+  document.getElementById('currentPw').value = '';
+  document.getElementById('newPw').value = '';
+  document.getElementById('confirmPw').value = '';
+  showMsg('pwSuccess', true);
+}
+
+// ── CLEAR / RESET ─────────────────────────────────────────────────────────
+function clearHistory() {
+  if (!confirm('Clear all transactions? This cannot be undone.')) return;
+  STATE.transactions = [];
+  saveState(); refreshUI();
+}
+
+function resetBalance() {
+  if (!confirm('Reset balance to $0? This cannot be undone.')) return;
+  STATE.balance = 0;
+  STATE.transactions = [];
+  saveState(); refreshUI();
+}
+
+// ── FILTER ────────────────────────────────────────────────────────────────
+function filterTx(type, btn) {
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const filtered = type === 'all' ? STATE.transactions : STATE.transactions.filter(t => t.type === type);
+  renderTxList('fullTxList', filtered);
+}
+
+// ── RENDER ────────────────────────────────────────────────────────────────
+function txHTML(tx) {
+  const icons = {in:'⬇️', out:'⬆️', send:'↗️'};
+  const sign = tx.type === 'in' ? '+' : '-';
+  return `
+    <div class="tx-item">
+      <div class="tx-icon ${tx.type}">${icons[tx.type]}</div>
+      <div class="tx-info">
+        <div class="tx-desc">${tx.desc}</div>
+        <div class="tx-date">${tx.date}</div>
+      </div>
+      <div class="tx-amount ${tx.type === 'in' ? 'in' : 'out'}">${sign}${fmt(tx.amount)}</div>
+    </div>`;
+}
+
+function renderTxList(elId, txs) {
+  const el = document.getElementById(elId);
+  if (!txs.length) {
+    el.innerHTML = `<div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:24px;text-align:center;letter-spacing:1px;">No transactions found.</div>`;
+    return;
+  }
+  el.innerHTML = txs.map(txHTML).join('');
+}
+
+function refreshUI() {
+  // Balance
+  document.getElementById('balanceDisplay').textContent = Number(STATE.balance).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+
+  // Stats
+  const totalIn = STATE.transactions.filter(t=>t.type==='in').reduce((s,t)=>s+t.amount,0);
+  const totalOut = STATE.transactions.filter(t=>t.type!=='in').reduce((s,t)=>s+t.amount,0);
+  document.getElementById('totalIn').textContent = fmt(totalIn);
+  document.getElementById('totalOut').textContent = fmt(totalOut);
+  document.getElementById('txCount').textContent = STATE.transactions.length;
+
+  // Recent (last 5)
+  renderTxList('recentTxList', STATE.transactions.slice(0, 5));
+
+  // Full history
+  renderTxList('fullTxList', STATE.transactions);
+}
+
+// ── VIRTUAL MONEY GENERATOR ──────────────────────────────────────────────
+const VIRTUAL_SENDERS = [
+  "PayPal Transfer", "Stripe Payment", "Wire Transfer",
+  "Client Payment", "Freelance Income", "Investment Return",
+  "Bank Transfer", "Salary Credit", "Bonus Payment",
+  "Refund Received", "Dividend Payment", "Commission Earned",
+  "Online Sale", "Consulting Fee", "Project Payment"
+];
+
+const VIRTUAL_RECIPIENTS = [
+  "Amazon Purchase", "Netflix Subscription", "Uber Ride",
+  "Grocery Store", "Electric Bill", "Rent Payment",
+  "Phone Bill", "Insurance Premium", "Online Shopping",
+  "Restaurant", "Gym Membership", "Spotify Premium",
+  "Hotel Booking", "Flight Ticket", "Medical Bill"
+];
+
+function generateMoney(amount) {
+  const sender = VIRTUAL_SENDERS[Math.floor(Math.random() * VIRTUAL_SENDERS.length)];
+  STATE.balance += amount;
+  addTx('in', amount, sender);
+  showGenMsg(`✅ $${amount.toLocaleString()} received from ${sender}`);
+}
+
+function generateRandomTx() {
+  const isIn = Math.random() > 0.4;
+  const amounts = [250, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000];
+  const amount = amounts[Math.floor(Math.random() * amounts.length)];
+  if (isIn) {
+    const sender = VIRTUAL_SENDERS[Math.floor(Math.random() * VIRTUAL_SENDERS.length)];
+    STATE.balance += amount;
+    addTx('in', amount, sender);
+    showGenMsg(`✅ $${amount.toLocaleString()} received from ${sender}`);
+  } else {
+    if (STATE.balance < amount) {
+      showGenMsg('⚠️ Not enough balance for outgoing transaction. Add money first!');
+      return;
+    }
+    const recipient = VIRTUAL_RECIPIENTS[Math.floor(Math.random() * VIRTUAL_RECIPIENTS.length)];
+    STATE.balance -= amount;
+    addTx('out', amount, recipient);
+    showGenMsg(`💸 $${amount.toLocaleString()} spent on ${recipient}`);
+  }
+}
+
+function generateMultiple() {
+  const count = 5;
+  let messages = [];
+  for (let i = 0; i < count; i++) {
+    const isIn = Math.random() > 0.45;
+    const amounts = [100, 250, 500, 1000, 2000, 3000, 5000];
+    const amount = amounts[Math.floor(Math.random() * amounts.length)];
+    if (isIn) {
+      const sender = VIRTUAL_SENDERS[Math.floor(Math.random() * VIRTUAL_SENDERS.length)];
+      STATE.balance += amount;
+      addTx('in', amount, sender);
+      messages.push(`+$${amount.toLocaleString()} (${sender})`);
+    } else {
+      if (STATE.balance >= amount) {
+        const recipient = VIRTUAL_RECIPIENTS[Math.floor(Math.random() * VIRTUAL_RECIPIENTS.length)];
+        STATE.balance -= amount;
+        addTx('out', amount, recipient);
+        messages.push(`-$${amount.toLocaleString()} (${recipient})`);
+      }
+    }
+  }
+  saveState();
+  refreshUI();
+  showGenMsg(`⚡ Generated ${messages.length} transactions!`);
+}
+
+function showGenMsg(msg) {
+  const el = document.getElementById('genMsg');
+  if (el) {
+    el.textContent = msg;
+    el.style.display = 'block';
+    setTimeout(() => el.style.display = 'none', 3000);
+  }
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────
+loadState();
+document.getElementById('pinInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+</script>
+</body>
+</html>
