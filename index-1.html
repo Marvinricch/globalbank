@@ -1,0 +1,1216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>GlobalBank — Online Banking</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, get, onValue, push, remove, update }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDfrutZukr5JDFmE2KJDA11HZZ8Tk1L4eA",
+  authDomain: "globalbank-f3adc.firebaseapp.com",
+  databaseURL: "https://globalbank-f3adc-default-rtdb.firebaseio.com",
+  projectId: "globalbank-f3adc",
+  storageBucket: "globalbank-f3adc.firebasestorage.app",
+  messagingSenderId: "510370388822",
+  appId: "1:510370388822:web:bea50649774c656f6954f7"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+// ── STATE ─────────────────────────────────────────────────────────────────
+let currentUser  = null;   // { username, accountId, role, name, lastLogin }
+let allUsers     = {};
+let transactions = {};
+let balance      = 0;
+let liveUnsub    = null;
+
+// ── FIREBASE HELPERS ──────────────────────────────────────────────────────
+const fbSet    = (p,v)     => set(ref(db,p), v);
+const fbGet    = async p   => { const s=await get(ref(db,p)); return s.exists()?s.val():null; };
+const fbPush   = async(p,v)=> { const r=push(ref(db,p)); await set(r,v); return r.key; };
+const fbRemove = p         => remove(ref(db,p));
+const fbUpdate = (p,v)     => update(ref(db,p), v);
+
+// ── HELPERS ───────────────────────────────────────────────────────────────
+const fmt = n => '$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const nowStr = () => new Date().toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+const isAdmin = () => currentUser && currentUser.role === 'admin';
+const initials = name => (name||'?').trim().split(/\s+/).slice(0,2).map(w=>w[0].toUpperCase()).join('');
+
+function showToast(msg, color='#16A34A') {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.background = color;
+  t.style.display = 'block';
+  setTimeout(()=> t.style.display='none', 2800);
+}
+function showMsg(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.style.display = 'block';
+  setTimeout(()=> el.style.display='none', 4000);
+}
+
+// ── ACCOUNT ID GENERATOR ───────────────────────────────────────────────────
+function randomAccountId() {
+  let id = '1';
+  for (let i=0;i<9;i++) id += Math.floor(Math.random()*10);
+  return id;
+}
+async function uniqueAccountId() {
+  const users = await fbGet('users') || {};
+  const taken = new Set(Object.values(users).map(u=>u.accountId));
+  let id;
+  do { id = randomAccountId(); } while (taken.has(id));
+  return id;
+}
+
+// ── INIT / MIGRATE ADMIN ───────────────────────────────────────────────────
+async function ensureAdmin() {
+  const existing = await fbGet('users/admin');
+  if (!existing) {
+    await fbSet('users/admin', {
+      username:'admin', password:'admin9999', role:'admin',
+      name:'Administrator', accountId:'1000000001', createdAt: nowStr(),
+    });
+  } else if (!existing.accountId) {
+    await fbUpdate('users/admin', { accountId: '1000000001' });
+  }
+  const bank = await fbGet('bank');
+  if (!bank) await fbSet('bank', { balance: 0, transactions: {} });
+}
+
+// ── LOGIN ─────────────────────────────────────────────────────────────────
+window.doLogin = async function() {
+  const accountId = document.getElementById('loginAccountId').value.trim();
+  const password  = document.getElementById('loginPassword').value.trim();
+  if (!accountId || !password) { showMsg('loginError'); return; }
+
+  await ensureAdmin();
+  const users = await fbGet('users') || {};
+  const entry = Object.entries(users).find(([k,u]) => u.accountId === accountId);
+
+  if (!entry || entry[1].password !== password) {
+    const err = document.getElementById('loginError');
+    err.textContent = 'Incorrect Account ID or password.';
+    err.style.display = 'block';
+    setTimeout(()=> err.style.display='none', 3000);
+    document.getElementById('loginPassword').value = '';
+    return;
+  }
+
+  const [key, user] = entry;
+  const previousLogin = user.lastLogin || 'First login';
+  currentUser = { username: key, accountId: user.accountId, role: user.role, name: user.name || key, lastLogin: previousLogin };
+  await fbUpdate(`users/${key}`, { lastLogin: nowStr() });
+
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  document.getElementById('sideName').textContent      = currentUser.name;
+  document.getElementById('sideRole').textContent       = isAdmin() ? 'Administrator' : 'Member';
+  document.getElementById('sideAvatar').textContent     = initials(currentUser.name);
+  document.getElementById('sideAcctId').textContent     = 'Acct · ' + currentUser.accountId;
+  document.getElementById('balNameTag').textContent     = currentUser.name;
+  document.getElementById('balAvatar').textContent      = initials(currentUser.name);
+  document.getElementById('lastLoginVal').textContent   = previousLogin;
+  document.getElementById('adminMenuItem').style.display = isAdmin() ? 'flex' : 'none';
+  document.getElementById('gearBtn').title = isAdmin() ? 'Admin settings' : 'Account settings';
+
+  startLiveSync();
+  showPage('dashboard');
+};
+
+window.doLogout = function() {
+  if (liveUnsub) liveUnsub();
+  currentUser = null;
+  closeSidebar();
+  document.getElementById('loginScreen').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginAccountId').value = '';
+  document.getElementById('loginPassword').value = '';
+};
+
+// ── LIVE SYNC ─────────────────────────────────────────────────────────────
+function startLiveSync() {
+  if (liveUnsub) liveUnsub();
+  liveUnsub = onValue(ref(db, 'bank'), snap => {
+    if (!snap.exists()) return;
+    const d = snap.val();
+    balance      = d.balance      || 0;
+    transactions = d.transactions || {};
+    refreshUI();
+  });
+  onValue(ref(db, 'users'), snap => {
+    allUsers = snap.exists() ? snap.val() : {};
+    renderUsersList();
+  });
+}
+
+// ── SIDEBAR / NAV ─────────────────────────────────────────────────────────
+window.openSidebar  = () => { document.getElementById('sidebar').classList.add('open'); document.getElementById('backdrop').classList.add('show'); };
+window.closeSidebar = () => { document.getElementById('sidebar').classList.remove('open'); document.getElementById('backdrop').classList.remove('show'); };
+
+window.showPage = function(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.menu-item').forEach(t => t.classList.remove('active'));
+  const pg = document.getElementById('page-'+id);
+  if (pg) pg.classList.add('active');
+  const mi = document.getElementById('menu-'+id);
+  if (mi) mi.classList.add('active');
+  document.querySelectorAll('.success-msg,.error-msg').forEach(el => el.style.display='none');
+  closeSidebar();
+  window.scrollTo(0,0);
+};
+
+window.gearClick = function() {
+  if (isAdmin()) { showPage('admin'); }
+  else { showPage('settings'); loadSettingsPage(); }
+};
+window.bellClick = () => showToast('No new notifications', '#2952D6');
+window.chatClick = () => showToast('Support chat is not available in this demo', '#2952D6');
+
+// ── SETTINGS ───────────────────────────────────────────────────────────────
+window.loadSettingsPage = function() {
+  if (!currentUser) return;
+  const u = allUsers[currentUser.username] || {};
+  document.getElementById('settingsNickname').value = u.nickname || '';
+  document.getElementById('settingsGender').value = u.gender || '';
+  document.getElementById('settingsNotifications').checked = u.notifications !== false;
+  document.getElementById('settingsDarkMode').checked = document.documentElement.classList.contains('dark');
+};
+
+window.saveSettings = async function() {
+  if (!currentUser) return;
+  const nickname = document.getElementById('settingsNickname').value.trim();
+  const gender = document.getElementById('settingsGender').value;
+  await fbUpdate(`users/${currentUser.username}`, { nickname, gender });
+  const s = document.getElementById('settingsSuccess');
+  s.style.display = 'block';
+  setTimeout(() => s.style.display = 'none', 2500);
+};
+
+window.toggleNotifications = async function(checked) {
+  if (!currentUser) return;
+  await fbUpdate(`users/${currentUser.username}`, { notifications: checked });
+  showToast(checked ? 'Notifications enabled' : 'Notifications disabled', '#2952D6');
+};
+
+window.toggleDarkMode = function(checked) {
+  document.documentElement.classList.toggle('dark', checked);
+  try { localStorage.setItem('gb-dark-mode', checked ? '1' : '0'); } catch(e) {}
+};
+
+(function initDarkModePreference() {
+  try {
+    if (localStorage.getItem('gb-dark-mode') === '1') {
+      document.documentElement.classList.add('dark');
+    }
+  } catch(e) {}
+})();
+
+// ── TRANSACTIONS ──────────────────────────────────────────────────────────
+async function addTx(type, amount, desc) {
+  await fbPush('bank/transactions', {type, amount, desc, date: nowStr(), by: currentUser.username});
+  const newBal = balance + (type==='in' ? amount : -amount);
+  await fbSet('bank/balance', newBal);
+}
+
+window.doDeposit = async function() {
+  const amt  = parseFloat(document.getElementById('depositAmount').value);
+  const desc = document.getElementById('depositDesc').value || 'Deposit';
+  if (!amt||amt<=0) { showMsg('depositError'); return; }
+  await addTx('in', amt, desc);
+  document.getElementById('depositAmount').value = '';
+  document.getElementById('depositDesc').value   = '';
+  showMsg('depositSuccess');
+};
+
+window.doWithdraw = async function() {
+  const amt  = parseFloat(document.getElementById('withdrawAmount').value);
+  const desc = document.getElementById('withdrawDesc').value || 'Withdrawal';
+  if (!amt||amt<=0||amt>balance) { showMsg('withdrawError'); return; }
+  await addTx('out', amt, desc);
+  document.getElementById('withdrawAmount').value = '';
+  document.getElementById('withdrawDesc').value   = '';
+  showMsg('withdrawSuccess');
+};
+
+window.doSend = async function() {
+  const recipient = document.getElementById('sendRecipient').value.trim();
+  const bank_     = document.getElementById('sendBank').value.trim();
+  const acct      = document.getElementById('sendAcct').value.trim();
+  const amt       = parseFloat(document.getElementById('sendAmount').value);
+  const narration = document.getElementById('sendNarration').value||'Domestic transfer';
+  if (!recipient||!bank_||!acct||!amt||amt<=0||amt>balance) { showMsg('sendError'); return; }
+  await addTx('send', amt, `To ${recipient} · ${bank_} · ${acct} · ${narration}`);
+  ['sendRecipient','sendBank','sendAcct','sendAmount','sendNarration'].forEach(id=>document.getElementById(id).value='');
+  showMsg('sendSuccess');
+};
+
+window.doWire = async function() {
+  const recipient = document.getElementById('wireRecipient').value.trim();
+  const bank_     = document.getElementById('wireBank').value.trim();
+  const swift     = document.getElementById('wireSwift').value.trim();
+  const iban      = document.getElementById('wireIban').value.trim();
+  const country   = document.getElementById('wireCountry').value.trim();
+  const amt       = parseFloat(document.getElementById('wireAmount').value);
+  const purpose   = document.getElementById('wirePurpose').value||'Wire transfer';
+  if (!recipient||!bank_||!swift||!iban||!country||!amt||amt<=0||amt>balance) { showMsg('wireError'); return; }
+  await addTx('wire', amt, `Wire to ${recipient} · ${bank_} (${swift}) · ${country} · ${purpose}`);
+  ['wireRecipient','wireBank','wireSwift','wireIban','wireCountry','wireAmount','wirePurpose'].forEach(id=>document.getElementById(id).value='');
+  showMsg('wireSuccess');
+};
+
+// ── EDIT / DELETE TX (ADMIN ONLY) ─────────────────────────────────────────
+window.openEditModal = function(key) {
+  if (!isAdmin()) return;
+  const tx = transactions[key];
+  if (!tx) return;
+  document.getElementById('editTxKey').value    = key;
+  document.getElementById('editTxAmount').value = tx.amount;
+  document.getElementById('editTxDesc').value   = tx.desc;
+  document.getElementById('editTxType').value   = tx.type;
+  document.getElementById('editModal').classList.add('open');
+};
+window.closeEditModal = () => document.getElementById('editModal').classList.remove('open');
+
+window.saveEdit = async function() {
+  const key    = document.getElementById('editTxKey').value;
+  const amount = parseFloat(document.getElementById('editTxAmount').value);
+  const desc   = document.getElementById('editTxDesc').value.trim();
+  const type   = document.getElementById('editTxType').value;
+  if (!amount||amount<=0||!desc) { showToast('Fill all fields','#DC2626'); return; }
+  const oldTx     = transactions[key];
+  const oldEffect = oldTx.type==='in'?oldTx.amount:-oldTx.amount;
+  const newEffect = type==='in'?amount:-amount;
+  const newBal    = balance - oldEffect + newEffect;
+  if (newBal < 0) { showToast('Balance would go negative','#DC2626'); return; }
+  await fbUpdate(`bank/transactions/${key}`, {amount, desc, type});
+  await fbSet('bank/balance', newBal);
+  closeEditModal();
+  showToast('Transaction updated');
+};
+
+window.deleteTx = async function(key) {
+  if (!isAdmin()) return;
+  if (!confirm('Delete this transaction?')) return;
+  const tx     = transactions[key];
+  const effect = tx.type==='in'?-tx.amount:tx.amount;
+  const newBal = Math.max(0, balance + effect);
+  await fbRemove(`bank/transactions/${key}`);
+  await fbSet('bank/balance', newBal);
+  showToast('Transaction deleted');
+};
+
+// ── VIRTUAL GENERATOR (ADMIN ONLY) ────────────────────────────────────────
+const SENDERS  = ["PayPal Transfer","Stripe Payment","Wire Transfer","Client Payment","Freelance Income","Investment Return","Bank Transfer","Salary Credit","Bonus Payment","Refund Received","Dividend Payment","Commission Earned","Online Sale","Consulting Fee","Project Payment"];
+const SPENDERS = ["Amazon Purchase","Netflix Subscription","Uber Ride","Grocery Store","Electric Bill","Rent Payment","Phone Bill","Insurance Premium","Online Shopping","Restaurant","Gym Membership","Spotify Premium","Hotel Booking","Flight Ticket","Medical Bill"];
+
+window.generateMoney = async function(amount) {
+  if (!isAdmin()) return;
+  const sender = SENDERS[Math.floor(Math.random()*SENDERS.length)];
+  await addTx('in', amount, sender);
+  showToast(`${fmt(amount)} received — ${sender}`);
+};
+window.generateRandomTx = async function() {
+  if (!isAdmin()) return;
+  const isIn  = Math.random()>0.4;
+  const amts  = [250,500,750,1000,1500,2000,3000,5000,7500,10000];
+  const amount= amts[Math.floor(Math.random()*amts.length)];
+  if (isIn) {
+    const s = SENDERS[Math.floor(Math.random()*SENDERS.length)];
+    await addTx('in', amount, s);
+    showToast(`${fmt(amount)} from ${s}`);
+  } else {
+    if (balance<amount) { showToast('Not enough balance','#DC2626'); return; }
+    const s = SPENDERS[Math.floor(Math.random()*SPENDERS.length)];
+    await addTx('out', amount, s);
+    showToast(`${fmt(amount)} spent on ${s}`);
+  }
+};
+window.generateMultiple = async function() {
+  if (!isAdmin()) return;
+  for (let i=0;i<5;i++) {
+    const isIn  = Math.random()>0.45;
+    const amts  = [100,250,500,1000,2000,3000,5000];
+    const amount= amts[Math.floor(Math.random()*amts.length)];
+    if (isIn) {
+      await addTx('in', amount, SENDERS[Math.floor(Math.random()*SENDERS.length)]);
+    } else if (balance>=amount) {
+      await addTx('out', amount, SPENDERS[Math.floor(Math.random()*SPENDERS.length)]);
+    }
+  }
+  showToast('5 transactions generated');
+};
+
+// ── DECORATIVE FEATURES ────────────────────────────────────────────────────
+window.requestCard = () => showToast('Request sent — a banker will contact you', '#2952D6');
+window.applyLoan    = () => showToast('Loan applications are not available in this demo', '#2952D6');
+
+// ── USER MANAGEMENT (ADMIN ONLY) ─────────────────────────────────────────
+window.createUser = async function() {
+  if (!isAdmin()) return;
+  const username = document.getElementById('newUsername').value.trim().toLowerCase();
+  const password = document.getElementById('newUserPassword').value.trim();
+  const name     = document.getElementById('newUserName').value.trim();
+  const role     = document.getElementById('newUserRole').value;
+  if (!username||!password||!name) { showMsg('createUserError'); return; }
+  const existing = await fbGet(`users/${username}`);
+  if (existing) { showToast('Username already exists','#DC2626'); return; }
+  const accountId = await uniqueAccountId();
+  await fbSet(`users/${username}`, { username, password, name, role, accountId, createdAt: nowStr() });
+  document.getElementById('newUsername').value      = '';
+  document.getElementById('newUserPassword').value  = '';
+  document.getElementById('newUserName').value      = '';
+  const readout = document.getElementById('newAcctReadout');
+  readout.style.display = 'flex';
+  document.getElementById('newAcctIdText').textContent = accountId;
+  showMsg('createUserSuccess');
+};
+
+window.copyNewAcctId = function() {
+  const id = document.getElementById('newAcctIdText').textContent;
+  navigator.clipboard?.writeText(id);
+  showToast('Account ID copied');
+};
+
+window.deleteUser = async function(username) {
+  if (!isAdmin()) return;
+  if (username === 'admin') { showToast('Cannot delete admin','#DC2626'); return; }
+  if (!confirm(`Delete user "${username}"?`)) return;
+  await fbRemove(`users/${username}`);
+  showToast(`${username} deleted`);
+};
+
+window.resetUserPassword = async function(username) {
+  if (!isAdmin()) return;
+  const newPw = prompt(`New password for "${username}":`);
+  if (!newPw || newPw.length < 4) { showToast('Password too short','#DC2626'); return; }
+  await fbUpdate(`users/${username}`, { password: newPw });
+  showToast(`Password reset for ${username}`);
+};
+
+function renderUsersList() {
+  const el = document.getElementById('usersList');
+  if (!el) return;
+  const users = Object.entries(allUsers);
+  if (!users.length) { el.innerHTML = '<div class="empty-note">No members yet.</div>'; return; }
+  el.innerHTML = users.map(([uid, u]) => `
+    <div class="list-row">
+      <div class="row-avatar ${u.role==='admin'?'avatar-admin':''}">${initials(u.name)}</div>
+      <div class="row-info">
+        <div class="row-title">${u.name} <span class="row-tag ${u.role==='admin'?'tag-admin':'tag-user'}">${u.role==='admin'?'Admin':'Member'}</span></div>
+        <div class="row-sub">Acct · <span class="mono">${u.accountId||'—'}</span> · opened ${u.createdAt||'—'}</div>
+      </div>
+      ${u.username!=='admin'?`
+        <div class="row-actions">
+          <button onclick="resetUserPassword('${u.username}')" class="chip-btn">Reset</button>
+          <button onclick="deleteUser('${u.username}')" class="chip-btn chip-danger">Remove</button>
+        </div>`:`<span class="chip-protected">Protected</span>`}
+    </div>`).join('');
+}
+
+// ── ADMIN PASSWORD CHANGE ─────────────────────────────────────────────────
+window.changeAdminPassword = async function() {
+  if (!isAdmin()) return;
+  const cur  = document.getElementById('curAdminPw').value;
+  const nw   = document.getElementById('newAdminPw').value;
+  const conf = document.getElementById('confAdminPw').value;
+  const adminData = await fbGet('users/admin');
+  if (cur !== adminData.password || !nw || nw!==conf || nw.length<4) { showMsg('adminPwError'); return; }
+  await fbUpdate('users/admin', { password: nw });
+  ['curAdminPw','newAdminPw','confAdminPw'].forEach(id=>document.getElementById(id).value='');
+  showMsg('adminPwSuccess');
+};
+
+window.clearHistory = async function() {
+  if (!confirm('Clear all transactions?')) return;
+  await fbSet('bank/transactions', {});
+  await fbSet('bank/balance', 0);
+  showToast('All transactions cleared');
+};
+window.resetBalance = async function() {
+  if (!confirm('Reset balance to $0?')) return;
+  await fbSet('bank/balance', 0);
+  await fbSet('bank/transactions', {});
+  showToast('Balance reset');
+};
+
+// ── FILTER ────────────────────────────────────────────────────────────────
+window.filterTx = function(type, btn) {
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  const txArr = Object.entries(transactions).map(([k,v])=>({...v,key:k})).reverse();
+  renderTxList('fullTxList', type==='all'?txArr:txArr.filter(t=>t.type===type), true);
+};
+
+// ── RENDER ────────────────────────────────────────────────────────────────
+const TYPE_META = {
+  in:   { icon:'↓', cls:'ic-in',   label:'Deposit' },
+  out:  { icon:'↑', cls:'ic-out',  label:'Withdrawal' },
+  send: { icon:'⇄', cls:'ic-send', label:'Domestic Transfer' },
+  wire: { icon:'🌐', cls:'ic-wire', label:'Wire Transfer' },
+};
+
+function txHTML(tx, sn) {
+  const meta = TYPE_META[tx.type] || TYPE_META.out;
+  const sign = tx.type==='in' ? '+' : '−';
+  const editBtns = isAdmin() ? `
+    <div class="row-actions">
+      <button onclick="openEditModal('${tx.key}')" class="chip-btn">Edit</button>
+      <button onclick="deleteTx('${tx.key}')" class="chip-btn chip-danger">Del</button>
+    </div>` : '';
+  return `
+    <div class="list-row">
+      <div class="row-sn">${sn}</div>
+      <div class="row-icon ${meta.cls}">${meta.icon}</div>
+      <div class="row-info">
+        <div class="row-title">${tx.desc}</div>
+        <div class="row-sub">${meta.label} · ${tx.date||''}</div>
+      </div>
+      <div class="row-amount ${tx.type==='in'?'amt-in':'amt-out'}">${sign}${fmt(tx.amount)}</div>
+      ${editBtns}
+    </div>`;
+}
+
+function renderTxList(elId, txArr, numbered) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!txArr.length) {
+    el.innerHTML = `<div class="empty-note">No transactions yet. Make your first deposit to get started.</div>`;
+    return;
+  }
+  el.innerHTML = txArr.map((tx,i)=>txHTML(tx, txArr.length-i)).join('');
+}
+
+function refreshUI() {
+  const balEl = document.getElementById('balanceDisplay');
+  if (balEl) balEl.textContent = Number(balance).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+  const txArr = Object.entries(transactions).map(([k,v])=>({...v,key:k})).reverse();
+  const totalIn  = txArr.filter(t=>t.type==='in').reduce((s,t)=>s+t.amount,0);
+  const totalOut = txArr.filter(t=>t.type!=='in').reduce((s,t)=>s+t.amount,0);
+  const tiEl=document.getElementById('totalIn');
+  const toEl=document.getElementById('totalOut');
+  const tcEl=document.getElementById('txCount');
+  if(tiEl) tiEl.textContent=fmt(totalIn);
+  if(toEl) toEl.textContent=fmt(totalOut);
+  if(tcEl) tcEl.textContent=txArr.length;
+
+  const recentTxEl = document.getElementById('recentTxVal');
+  if (recentTxEl) recentTxEl.textContent = txArr.length ? fmt(txArr[0].amount) : '—';
+
+  const gen = document.getElementById('generatorSection');
+  if (gen) gen.style.display = isAdmin() ? 'block' : 'none';
+  const adminSettings = document.getElementById('adminSettingsSection');
+  if (adminSettings) adminSettings.style.display = isAdmin() ? 'block' : 'none';
+  const statsRow = document.getElementById('statsRow');
+  if (statsRow) statsRow.style.display = isAdmin() ? 'grid' : 'none';
+
+  renderTxList('recentTxList', txArr.slice(0, isAdmin() ? 5 : 3), true);
+  renderTxList('fullTxList', txArr, true);
+  renderUsersList();
+}
+</script>
+
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#EEF1F7; --card:#FFFFFF;
+  --ink:#1B2333; --muted:#6B7280; --muted2:#9AA3B2;
+  --line:#E4E8F0;
+  --blue-deep:#152C66; --blue:#2952D6; --blue-light:#5B82F0;
+  --green:#16A34A; --green-soft:#E8F7EE;
+  --red:#DC2626; --red-soft:#FDECEC;
+}
+html.dark{
+  --bg:#0E1420; --card:#171F2E;
+  --ink:#EDF0F5; --muted:#9AA5B5; --muted2:#6B7688;
+  --line:#252F42;
+  --blue-deep:#7FA0F5; --blue:#5B82F0; --blue-light:#7FA0F5;
+  --green:#34D07A; --green-soft:#123424;
+  --red:#F0554A; --red-soft:#3A1A1A;
+}
+body{background:var(--bg);color:var(--ink);font-family:'Inter','Plus Jakarta Sans',sans-serif;min-height:100vh;transition:background 0.2s,color 0.2s;}
+.toggle-switch{position:relative;display:inline-block;width:44px;height:25px;flex-shrink:0;}
+.toggle-switch input{opacity:0;width:0;height:0;}
+.toggle-slider{position:absolute;cursor:pointer;inset:0;background:var(--line);border-radius:999px;transition:0.2s;}
+.toggle-slider::before{content:"";position:absolute;height:19px;width:19px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:0.2s;box-shadow:0 1px 3px #00000030;}
+.toggle-switch input:checked + .toggle-slider{background:var(--blue);}
+.toggle-switch input:checked + .toggle-slider::before{transform:translateX(19px);}
+.mono{font-variant-numeric:tabular-nums;letter-spacing:0.3px;}
+
+#toast{
+  position:fixed;bottom:22px;left:50%;transform:translateX(-50%);
+  color:#fff;font-size:13px;font-weight:600;padding:12px 22px;border-radius:10px;
+  z-index:999;display:none;box-shadow:0 10px 28px #00000030;text-align:center;max-width:90vw;
+}
+
+/* ══ LOGIN ══ */
+#loginScreen{
+  position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;
+  padding:24px;background:linear-gradient(160deg,var(--blue-deep),var(--blue) 55%,#7BA0F2);
+}
+.login-card{
+  width:min(400px,100%);background:var(--card);border-radius:18px;
+  padding:36px 30px;box-shadow:0 30px 60px -10px #15265060;
+  animation:riseIn 0.5s cubic-bezier(.2,.8,.2,1);
+}
+.login-logo{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:22px;}
+.logo-mark{
+  width:46px;height:46px;border-radius:12px;background:linear-gradient(145deg,var(--blue),var(--blue-deep));
+  display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:22px;
+}
+.logo-word{font-size:20px;font-weight:800;color:var(--blue-deep);letter-spacing:-0.3px;}
+.login-heading{font-size:25px;font-weight:900;text-align:center;margin-bottom:6px;letter-spacing:-0.4px;}
+.login-sub{font-size:13px;color:var(--muted);text-align:center;margin-bottom:26px;line-height:1.5;}
+.field{margin-bottom:16px;}
+.field-label{font-size:11px;font-weight:700;letter-spacing:0.6px;color:var(--muted);text-transform:uppercase;margin-bottom:6px;display:block;}
+.input-wrap{position:relative;display:flex;align-items:center;border:1.5px solid var(--line);border-radius:10px;padding:0 12px;transition:border-color 0.2s;background:#FAFBFD;}
+.input-wrap:focus-within{border-color:var(--blue);}
+.input-icon{font-size:14px;color:var(--muted2);margin-right:8px;}
+.field-input{flex:1;border:none;background:none;outline:none;padding:13px 0;font-size:15px;font-family:'Plus Jakarta Sans',sans-serif;color:var(--ink);}
+.field-top-row{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;}
+.btn-primary{
+  width:100%;background:var(--blue);color:#fff;font-weight:700;font-size:15px;
+  border:none;border-radius:10px;padding:15px;cursor:pointer;transition:all 0.2s;margin-top:6px;
+  box-shadow:0 10px 20px -6px #2952D660;
+}
+.btn-primary:hover{background:var(--blue-deep);transform:translateY(-1px);}
+.login-error{color:var(--red);font-size:12px;text-align:center;margin-top:12px;display:none;font-weight:600;}
+.login-foot{font-size:12px;color:var(--muted);text-align:center;margin-top:20px;line-height:1.6;}
+@keyframes riseIn{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
+
+/* ══ APP SHELL ══ */
+#app{display:none;min-height:100vh;}
+header{
+  background:var(--card);border-bottom:1px solid var(--line);
+  padding:0 16px;display:flex;align-items:center;justify-content:space-between;
+  height:58px;position:sticky;top:0;z-index:60;
+}
+.icon-btn{
+  width:36px;height:36px;border-radius:9px;border:none;background:transparent;
+  display:flex;align-items:center;justify-content:center;font-size:17px;cursor:pointer;
+  color:var(--ink);transition:background 0.15s;
+}
+.icon-btn:hover{background:var(--bg);}
+.header-left{display:flex;align-items:center;gap:10px;}
+.header-brand{display:flex;align-items:center;gap:8px;}
+.header-right{display:flex;align-items:center;gap:4px;}
+
+main{padding:18px 14px 60px;max-width:680px;margin:0 auto;}
+.page{display:none;}.page.active{display:block;animation:fadeUp 0.3s ease;}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+
+/* ══ SIDEBAR DRAWER ══ */
+#backdrop{position:fixed;inset:0;background:#0008;z-index:90;opacity:0;pointer-events:none;transition:opacity 0.25s;}
+#backdrop.show{opacity:1;pointer-events:auto;}
+#sidebar{
+  position:fixed;top:0;left:0;height:100%;width:280px;background:var(--card);
+  z-index:95;transform:translateX(-100%);transition:transform 0.28s cubic-bezier(.2,.8,.2,1);
+  box-shadow:8px 0 30px #00000020;display:flex;flex-direction:column;
+}
+#sidebar.open{transform:translateX(0);}
+.side-profile{padding:26px 22px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;}
+.side-avatar{width:46px;height:46px;border-radius:50%;background:linear-gradient(145deg,var(--blue),var(--blue-deep));color:#fff;font-weight:700;font-size:15px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.side-name{font-weight:700;font-size:15px;}
+.side-role{font-size:11.5px;color:var(--muted);margin-top:1px;}
+.side-acct{font-size:10.5px;color:var(--muted2);margin-top:3px;font-variant-numeric:tabular-nums;}
+.side-menu{flex:1;overflow-y:auto;padding:10px 12px;}
+.menu-item{
+  display:flex;align-items:center;gap:13px;padding:12px 12px;border-radius:10px;cursor:pointer;
+  color:var(--ink);font-size:14px;font-weight:600;transition:background 0.15s;margin-bottom:2px;
+}
+.menu-item:hover{background:var(--bg);}
+.menu-item.active{background:var(--blue);color:#fff;}
+.menu-icon{font-size:16px;width:22px;text-align:center;}
+.menu-divider{height:1px;background:var(--line);margin:10px 6px;}
+.side-foot{padding:14px 22px 22px;}
+.btn-signout{
+  width:100%;background:var(--bg);border:1px solid var(--line);color:var(--ink);
+  font-weight:700;font-size:13px;padding:12px;border-radius:10px;cursor:pointer;transition:all 0.2s;
+}
+.btn-signout:hover{border-color:var(--red);color:var(--red);}
+
+/* ══ BALANCE CARD ══ */
+.balance-card{
+  background:linear-gradient(135deg,var(--blue-deep),var(--blue) 60%,#5B82F0);
+  border-radius:18px;padding:24px 22px 0;color:#fff;position:relative;overflow:hidden;
+  box-shadow:0 18px 36px -12px #1c2e6a55;
+}
+.balance-card::after{content:'';position:absolute;right:-50px;top:-50px;width:200px;height:200px;border-radius:50%;background:#ffffff10;}
+.bal-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px;}
+.name-pill{display:flex;align-items:center;gap:9px;background:#ffffff1a;border-radius:30px;padding:5px 14px 5px 5px;}
+.pill-avatar{width:28px;height:28px;border-radius:50%;background:#ffffff30;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;}
+.pill-name{font-size:13px;font-weight:700;}
+.add-btn{width:34px;height:34px;border-radius:50%;background:#ffffff20;border:none;color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.add-btn:hover{background:#ffffff35;}
+.bal-label{font-size:12px;opacity:0.8;font-weight:600;letter-spacing:0.3px;}
+.bal-amount{font-size:clamp(30px,8vw,42px);font-weight:800;letter-spacing:-1px;margin-top:4px;}
+
+.bal-subcards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:18px;transform:translateY(20px);}
+.subcard{background:var(--card);border-radius:13px;padding:13px 16px;box-shadow:0 10px 24px -8px #00000022;}
+.subcard-label{font-size:11px;color:var(--muted);font-weight:600;display:flex;justify-content:space-between;}
+.subcard-val{font-size:17px;font-weight:800;margin-top:4px;color:var(--ink);}
+.subcard-val.muted-zero{color:var(--muted2);}
+
+.bal-pad{height:34px;}
+.status-row{display:flex;justify-content:center;margin-bottom:16px;}
+.status-pill{background:var(--green);color:#fff;font-size:11px;font-weight:700;letter-spacing:1.2px;padding:6px 22px;border-radius:30px;}
+
+.info-rows{padding:0 22px;}
+.info-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #ffffff20;font-size:12.5px;}
+.info-row:last-child{border-bottom:none;}
+.info-key{opacity:0.75;}
+.info-val{font-weight:700;}
+
+.transfer-pills{display:flex;gap:10px;padding:18px 22px 22px;}
+.transfer-pill{
+  flex:1;background:#ffffff18;border:1px solid #ffffff35;color:#fff;font-size:12.5px;font-weight:700;
+  padding:12px;border-radius:10px;cursor:pointer;text-align:center;transition:all 0.2s;
+}
+.transfer-pill:hover{background:#ffffff30;}
+
+/* ══ STATS ROW ══ */
+.stats-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0;}
+.stat-card{background:var(--card);border-radius:13px;padding:14px 12px;text-align:center;box-shadow:0 6px 16px -8px #00000018;}
+.products-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;}
+.product-card{background:var(--card);border-radius:14px;padding:16px 14px;box-shadow:0 6px 16px -8px #00000018;}
+.product-icon{font-size:22px;margin-bottom:8px;}
+.product-name{font-size:13.5px;font-weight:700;margin-bottom:4px;}
+.product-desc{font-size:11.5px;color:var(--muted);line-height:1.4;}
+@media(max-width:380px){.products-grid{grid-template-columns:1fr;}}
+.stat-label{font-size:10px;color:var(--muted);font-weight:700;letter-spacing:0.3px;text-transform:uppercase;}
+.stat-value{font-size:17px;font-weight:800;margin-top:5px;}
+.stat-value.green{color:var(--green);}.stat-value.red{color:var(--red);}.stat-value.blue{color:var(--blue);}
+
+/* ══ SECTIONS / CARDS ══ */
+.section-title{font-size:15px;font-weight:800;margin:22px 0 12px;display:flex;align-items:center;justify-content:space-between;}
+.card{background:var(--card);border-radius:16px;padding:22px 20px;box-shadow:0 6px 20px -10px #00000020;margin-bottom:16px;}
+.card-title{font-size:18px;font-weight:800;margin-bottom:18px;}
+
+/* ══ LIST ROWS (transactions / members) ══ */
+.list{display:flex;flex-direction:column;border-radius:14px;overflow:hidden;background:var(--card);box-shadow:0 6px 20px -10px #00000020;}
+.list-row{display:flex;align-items:center;gap:11px;padding:13px 16px;border-bottom:1px solid var(--line);}
+.list-row:last-child{border-bottom:none;}
+.row-sn{font-size:10.5px;color:var(--muted2);font-weight:700;width:18px;flex-shrink:0;}
+.row-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;}
+.ic-in{background:var(--green-soft);color:var(--green);}
+.ic-out{background:var(--red-soft);color:var(--red);}
+.ic-send{background:#EEF1FF;color:var(--blue);}
+.ic-wire{background:#EAF6FF;color:#0EA5E9;}
+.row-avatar{width:36px;height:36px;border-radius:50%;background:#EEF1FF;color:var(--blue);font-weight:700;font-size:12px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.row-avatar.avatar-admin{background:#FFF4E5;color:#D97706;}
+.row-info{flex:1;min-width:0;}
+.row-title{font-size:13.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.row-tag{font-size:9px;font-weight:700;padding:2px 7px;border-radius:6px;margin-left:6px;letter-spacing:0.3px;}
+.tag-admin{background:#FFF4E5;color:#D97706;}
+.tag-user{background:#EEF1FF;color:var(--blue);}
+.row-sub{font-size:11px;color:var(--muted);margin-top:2px;}
+.row-amount{font-size:14.5px;font-weight:800;white-space:nowrap;}
+.amt-in{color:var(--green);}.amt-out{color:var(--red);}
+.row-actions{display:flex;flex-direction:column;gap:4px;margin-left:4px;}
+.chip-btn{background:var(--bg);border:1px solid var(--line);color:var(--muted);font-size:9.5px;font-weight:700;padding:4px 8px;cursor:pointer;border-radius:6px;}
+.chip-btn:hover{border-color:var(--blue);color:var(--blue);}
+.chip-danger:hover{border-color:var(--red);color:var(--red);}
+.chip-protected{font-size:9.5px;color:var(--blue);font-weight:700;}
+.empty-note{font-size:12.5px;color:var(--muted);padding:30px 16px;text-align:center;background:var(--card);border-radius:14px;line-height:1.6;}
+
+/* ══ GENERATOR ══ */
+.gen-btns{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
+.gen-btn{background:var(--bg);border:1px solid var(--line);color:var(--ink);font-size:12px;font-weight:700;padding:9px 14px;border-radius:9px;cursor:pointer;transition:all 0.2s;}
+.gen-btn:hover{border-color:var(--blue);color:var(--blue);}
+.gen-btn.gold{background:var(--blue);border-color:var(--blue);color:#fff;}
+.gen-row{display:flex;gap:8px;flex-wrap:wrap;}
+.gen-row .gen-btn{flex:1;min-width:130px;text-align:center;}
+
+/* ══ FORMS ══ */
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+@media(max-width:480px){.form-row{grid-template-columns:1fr;}}
+.success-msg{background:var(--green-soft);color:var(--green);font-size:12.5px;font-weight:600;padding:12px 15px;border-radius:9px;margin-top:14px;display:none;}
+.error-msg{background:var(--red-soft);color:var(--red);font-size:12.5px;font-weight:600;padding:12px 15px;border-radius:9px;margin-top:14px;display:none;}
+.acct-readout{display:none;align-items:center;justify-content:space-between;background:#EEF1FF;border:1px dashed var(--blue);border-radius:10px;padding:12px 16px;margin-top:14px;}
+.acct-readout-text{font-size:12px;color:var(--blue-deep);}
+.acct-readout-id{font-weight:800;font-size:15px;color:var(--blue-deep);margin-top:2px;}
+.btn-copy{background:var(--blue);color:#fff;font-size:11px;font-weight:700;border:none;padding:8px 14px;border-radius:7px;cursor:pointer;}
+
+/* ══ FILTER ══ */
+.filter-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;}
+.filter-btn{background:var(--card);border:1px solid var(--line);color:var(--muted);font-size:11.5px;font-weight:700;padding:8px 14px;border-radius:20px;cursor:pointer;transition:all 0.2s;}
+.filter-btn.active{background:var(--blue);border-color:var(--blue);color:#fff;}
+
+/* ══ SETTINGS ══ */
+.settings-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--line);}
+.settings-row:last-child{border-bottom:none;}
+.settings-key{font-size:13.5px;font-weight:600;}
+.settings-val{font-size:12px;color:var(--muted);}
+
+/* ══ MODAL ══ */
+.modal-overlay{position:fixed;inset:0;background:#00000060;backdrop-filter:blur(2px);z-index:200;display:none;align-items:center;justify-content:center;padding:20px;}
+.modal-overlay.open{display:flex;}
+.modal{background:var(--card);border-radius:16px;width:min(400px,100%);padding:26px;position:relative;animation:fadeUp 0.25s ease;}
+.modal-title{font-size:19px;font-weight:800;margin-bottom:16px;}
+.modal-close{position:absolute;top:16px;right:18px;background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;}
+.modal-actions{display:flex;gap:10px;margin-top:8px;}
+.btn-cancel{flex:1;background:var(--bg);border:1px solid var(--line);color:var(--muted);font-size:12px;font-weight:700;padding:12px;cursor:pointer;border-radius:9px;}
+.btn-confirm{flex:2;background:var(--blue);border:none;color:#fff;font-size:14px;font-weight:700;padding:12px;cursor:pointer;border-radius:9px;}
+
+/* ══ DECORATIVE PAGES (Virtual Card / Loans) ══ */
+.vcard{
+  background:linear-gradient(135deg,#1B2333,#39435E 55%,#5B82F0);
+  border-radius:18px;padding:26px;color:#fff;position:relative;overflow:hidden;
+  box-shadow:0 18px 36px -12px #00000040;aspect-ratio:1.58;display:flex;flex-direction:column;justify-content:space-between;
+}
+.vcard::after{content:'';position:absolute;right:-40px;bottom:-40px;width:160px;height:160px;border-radius:50%;background:#ffffff10;}
+.vcard-top{display:flex;justify-content:space-between;align-items:flex-start;}
+.vcard-chip{width:38px;height:28px;border-radius:6px;background:linear-gradient(145deg,#D9B679,#B68A4E);}
+.vcard-brand{font-weight:800;font-size:15px;letter-spacing:0.5px;}
+.vcard-number{font-size:19px;font-weight:700;letter-spacing:2.5px;margin:18px 0 4px;}
+.vcard-bottom{display:flex;justify-content:space-between;align-items:flex-end;font-size:10.5px;opacity:0.85;}
+.vcard-status{display:inline-block;background:#ffffff20;font-size:10.5px;font-weight:700;padding:5px 12px;border-radius:20px;margin-top:14px;}
+
+.empty-state{text-align:center;padding:50px 20px;}
+.empty-icon{font-size:40px;margin-bottom:14px;}
+.empty-title{font-size:16px;font-weight:800;margin-bottom:6px;}
+.empty-sub{font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:20px;}
+
+::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:var(--bg);}::-webkit-scrollbar-thumb{background:#CBD3E0;}
+@media(max-width:420px){.bal-subcards{grid-template-columns:1fr 1fr;}.card{padding:18px 16px;}}
+</style>
+</head>
+<body>
+
+<div id="toast"></div>
+
+<!-- ══ LOGIN ══ -->
+<div id="loginScreen">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="logo-mark">🏦</div>
+      <div class="logo-word">GlobalBank</div>
+    </div>
+    <div class="login-heading">Sign in</div>
+    <div class="login-sub">Enter your Account ID and password to access your account.</div>
+
+    <div class="field">
+      <label class="field-label">Account ID</label>
+      <div class="input-wrap">
+        <span class="input-icon">👤</span>
+        <input class="field-input" type="text" id="loginAccountId" placeholder="e.g. 1234567890" inputmode="numeric" onkeydown="if(event.key==='Enter')doLogin()"/>
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-top-row">
+        <label class="field-label" style="margin-bottom:0;">Password</label>
+      </div>
+      <div class="input-wrap">
+        <span class="input-icon">🔒</span>
+        <input class="field-input" type="password" id="loginPassword" placeholder="Enter your password" onkeydown="if(event.key==='Enter')doLogin()"/>
+      </div>
+    </div>
+    <button class="btn-primary" onclick="doLogin()">Log In</button>
+    <div class="login-error" id="loginError">Incorrect Account ID or password.</div>
+    <div class="login-foot"><span style="cursor:pointer;color:var(--blue);font-weight:600;" onclick="chatClick()">Forgot your Account ID or password?</span><br/>Contact support for assistance.</div>
+  </div>
+</div>
+
+<!-- ══ APP ══ -->
+<div id="app">
+  <div id="backdrop" onclick="closeSidebar()"></div>
+
+  <div id="sidebar">
+    <div class="side-profile">
+      <div class="side-avatar" id="sideAvatar">?</div>
+      <div>
+        <div class="side-name" id="sideName">Member</div>
+        <div class="side-role" id="sideRole">Member</div>
+        <div class="side-acct" id="sideAcctId">Acct · —</div>
+      </div>
+    </div>
+    <div class="side-menu">
+      <div class="menu-item active" id="menu-dashboard" onclick="showPage('dashboard')"><span class="menu-icon">🏠</span>Dashboard</div>
+      <div class="menu-item" id="menu-deposit" onclick="showPage('deposit')"><span class="menu-icon">⬇️</span>Online Deposit</div>
+      <div class="menu-item" id="menu-withdraw" onclick="showPage('withdraw')"><span class="menu-icon">⬆️</span>Withdrawal</div>
+      <div class="menu-item" id="menu-send" onclick="showPage('send')"><span class="menu-icon">🔁</span>Domestic Transfer</div>
+      <div class="menu-item" id="menu-wire" onclick="showPage('wire')"><span class="menu-icon">🌐</span>Wire Transfer</div>
+      <div class="menu-item" id="menu-card" onclick="showPage('card')"><span class="menu-icon">💳</span>Virtual Card</div>
+      <div class="menu-item" id="menu-loans" onclick="showPage('loans')"><span class="menu-icon">🏛️</span>Loan &amp; Mortgages</div>
+      <div class="menu-item" id="menu-history" onclick="showPage('history')"><span class="menu-icon">📜</span>All Transaction Logs</div>
+      <div class="menu-item" id="menu-settings" onclick="showPage('settings');loadSettingsPage();"><span class="menu-icon">⚙️</span>Settings</div>
+      <div class="menu-divider"></div>
+      <div class="menu-item" id="adminMenuItem" style="display:none;" onclick="showPage('admin')"><span class="menu-icon">⚙️</span>Admin Panel</div>
+    </div>
+    <div class="side-foot">
+      <button class="btn-signout" onclick="doLogout()">Sign Out</button>
+    </div>
+  </div>
+
+  <header>
+    <div class="header-left">
+      <button class="icon-btn" onclick="openSidebar()">☰</button>
+      <div class="header-brand">
+        <div class="logo-mark" style="width:30px;height:30px;font-size:11px;">GB</div>
+        <span style="font-weight:800;font-size:15px;color:var(--blue-deep);">GlobalBank</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <button class="icon-btn" id="gearBtn" onclick="gearClick()">⚙️</button>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- DASHBOARD -->
+    <div class="page active" id="page-dashboard">
+      <div class="balance-card">
+        <div class="bal-top">
+          <div class="name-pill">
+            <div class="pill-avatar" id="balAvatar">?</div>
+            <div class="pill-name" id="balNameTag">Member</div>
+          </div>
+          <button class="add-btn" onclick="showPage('deposit')">+</button>
+        </div>
+        <div class="bal-label">Balance</div>
+        <div class="bal-amount">$<span id="balanceDisplay">0.00</span></div>
+
+        <div class="bal-subcards">
+          <div class="subcard">
+            <div class="subcard-label">Pending <span>▾</span></div>
+            <div class="subcard-val muted-zero">$0.00</div>
+          </div>
+          <div class="subcard">
+            <div class="subcard-label">My Loan <span>▴</span></div>
+            <div class="subcard-val" style="color:var(--red);">$0</div>
+          </div>
+        </div>
+        <div class="bal-pad"></div>
+
+        <div class="status-row"><span class="status-pill">ACTIVE</span></div>
+
+        <div class="info-rows">
+          <div class="info-row"><span class="info-key">Account Limit</span><span class="info-val">$5,000,000.00</span></div>
+          <div class="info-row"><span class="info-key">Recent Transaction</span><span class="info-val" id="recentTxVal">—</span></div>
+          <div class="info-row"><span class="info-key">Last Login</span><span class="info-val" id="lastLoginVal">—</span></div>
+        </div>
+
+        <div class="transfer-pills">
+          <button class="transfer-pill" onclick="showPage('send')">Domestic Transfer</button>
+          <button class="transfer-pill" onclick="showPage('wire')">Wire Transfer</button>
+        </div>
+      </div>
+
+      <div class="stats-row" id="statsRow" style="display:none;">
+        <div class="stat-card"><div class="stat-label">Total In</div><div class="stat-value green" id="totalIn">$0</div></div>
+        <div class="stat-card"><div class="stat-label">Total Out</div><div class="stat-value red" id="totalOut">$0</div></div>
+        <div class="stat-card"><div class="stat-label">Transactions</div><div class="stat-value blue" id="txCount">0</div></div>
+      </div>
+
+      <div id="generatorSection" style="display:none;">
+        <div class="section-title">Virtual Generator <span style="font-size:10.5px;color:var(--muted);font-weight:600;">admin only</span></div>
+        <div class="card">
+          <div class="gen-btns">
+            <button class="gen-btn" onclick="generateMoney(1000)">+$1K</button>
+            <button class="gen-btn" onclick="generateMoney(5000)">+$5K</button>
+            <button class="gen-btn" onclick="generateMoney(10000)">+$10K</button>
+            <button class="gen-btn" onclick="generateMoney(50000)">+$50K</button>
+            <button class="gen-btn gold" onclick="generateMoney(100000)">+$100K</button>
+          </div>
+          <div class="gen-row">
+            <button class="gen-btn" onclick="generateRandomTx()">🎲 Random</button>
+            <button class="gen-btn" onclick="generateMultiple()">⚡ Generate ×5</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-title">Recent Transactions</div>
+      <div class="list" id="recentTxList">
+        <div class="empty-note">No transactions yet. Make your first deposit to get started.</div>
+      </div>
+
+      <div class="section-title">Explore More Products</div>
+      <div class="products-grid">
+        <div class="product-card">
+          <div class="product-icon">💰</div>
+          <div class="product-name">Savings Account</div>
+          <div class="product-desc">Earn interest on your balance automatically.</div>
+        </div>
+        <div class="product-card">
+          <div class="product-icon">💳</div>
+          <div class="product-name">GlobalBank Card</div>
+          <div class="product-desc">Get a virtual or physical debit card.</div>
+        </div>
+        <div class="product-card">
+          <div class="product-icon">📈</div>
+          <div class="product-name">Fixed Deposit</div>
+          <div class="product-desc">Lock funds for a fixed term at a higher rate.</div>
+        </div>
+        <div class="product-card">
+          <div class="product-icon">🛡️</div>
+          <div class="product-name">Loan &amp; Credit</div>
+          <div class="product-desc">Flexible personal and business loans.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DEPOSIT -->
+    <div class="page" id="page-deposit">
+      <div class="card">
+        <div class="card-title">Online Deposit</div>
+        <div class="field"><label class="field-label">Amount ($)</label>
+          <div class="input-wrap"><input class="field-input" type="number" id="depositAmount" placeholder="e.g. 5000" min="1"/></div></div>
+        <div class="field"><label class="field-label">Description (optional)</label>
+          <div class="input-wrap"><input class="field-input" type="text" id="depositDesc" placeholder="e.g. Salary, Transfer in..."/></div></div>
+        <button class="btn-primary" onclick="doDeposit()">Deposit Funds</button>
+        <div class="success-msg" id="depositSuccess">Deposit successful.</div>
+        <div class="error-msg" id="depositError">Enter a valid amount.</div>
+      </div>
+    </div>
+
+    <!-- WITHDRAW -->
+    <div class="page" id="page-withdraw">
+      <div class="card">
+        <div class="card-title">Withdrawal</div>
+        <div class="field"><label class="field-label">Amount ($)</label>
+          <div class="input-wrap"><input class="field-input" type="number" id="withdrawAmount" placeholder="e.g. 2000" min="1"/></div></div>
+        <div class="field"><label class="field-label">Description (optional)</label>
+          <div class="input-wrap"><input class="field-input" type="text" id="withdrawDesc" placeholder="e.g. ATM withdrawal..."/></div></div>
+        <button class="btn-primary" onclick="doWithdraw()">Withdraw Funds</button>
+        <div class="success-msg" id="withdrawSuccess">Withdrawal successful.</div>
+        <div class="error-msg" id="withdrawError">Insufficient balance or invalid amount.</div>
+      </div>
+    </div>
+
+    <!-- DOMESTIC TRANSFER -->
+    <div class="page" id="page-send">
+      <div class="card">
+        <div class="card-title">Domestic Transfer</div>
+        <div class="field"><label class="field-label">Recipient Name</label>
+          <div class="input-wrap"><input class="field-input" type="text" id="sendRecipient" placeholder="e.g. John Doe"/></div></div>
+        <div class="form-row">
+          <div class="field"><label class="field-label">Bank</label>
+            <div class="input-wrap"><input class="field-input" type="text" id="sendBank" placeholder="e.g. GTBank"/></div></div>
+          <div class="field"><label class="field-label">Account Number</label>
+            <div class="input-wrap"><input class="field-input" type="text" id="sendAcct" placeholder="0123456789"/></div></div>
+        </div>
+        <div class="field"><label class="field-label">Amount ($)</label>
+          <div class="input-wrap"><input class="field-input" type="number" id="sendAmount" placeholder="e.g. 1000" min="1"/></div></div>
+        <div class="field"><label class="field-label">Narration</label>
+          <div class="input-wrap"><input class="field-input" type="text" id="sendNarration" placeholder="e.g. For rent..."/></div></div>
+        <button class="btn-primary" onclick="doSend()">Send Transfer</button>
+        <div class="success-msg" id="sendSuccess">Transfer successful.</div>
+        <div class="error-msg" id="sendError">Fill all fields and check your balance.</div>
+      </div>
+    </div>
+
+    <!-- WIRE TRANSFER -->
+    <div class="page" id="page-wire">
+      <div class="card">
+        <div class="card-title">Wire Transfer</div>
+        <div class="field"><label class="field-label">Beneficiary Name</label>
+          <div class="input-wrap"><input class="field-input" type="text" id="wireRecipient" placeholder="e.g. Acme Holdings Ltd"/></div></div>
+        <div class="field"><label class="field-label">Beneficiary Bank</label>
+          <div class="input-wrap"><input class="field-input" type="text" id="wireBank" placeholder="e.g. HSBC UK"/></div></div>
+        <div class="form-row">
+          <div class="field"><label class="field-label">SWIFT / BIC Code</label>
+            <div class="input-wrap"><input class="field-input" type="text" id="wireSwift" placeholder="e.g. HBUKGB4B"/></div></div>
+          <div class="field"><label class="field-label">Country</label>
+            <div class="input-wrap"><input class="field-input" type="text" id="wireCountry" placeholder="e.g. United Kingdom"/></div></div>
+        </div>
+        <div class="field"><label class="field-label">IBAN / Account Number</label>
+          <div class="input-wrap"><input class="field-input" type="text" id="wireIban" placeholder="e.g. GB29 NWBK 6016 1331 9268 19"/></div></div>
+        <div class="field"><label class="field-label">Amount ($)</label>
+          <div class="input-wrap"><input class="field-input" type="number" id="wireAmount" placeholder="e.g. 5000" min="1"/></div></div>
+        <div class="field"><label class="field-label">Purpose of Payment</label>
+          <div class="input-wrap"><input class="field-input" type="text" id="wirePurpose" placeholder="e.g. Invoice settlement"/></div></div>
+        <button class="btn-primary" onclick="doWire()">Send Wire Transfer</button>
+        <div class="success-msg" id="wireSuccess">Wire transfer submitted.</div>
+        <div class="error-msg" id="wireError">Fill all fields and check your balance.</div>
+      </div>
+    </div>
+
+    <!-- VIRTUAL CARD (decorative) -->
+    <div class="page" id="page-card">
+      <div class="card-title" style="margin-bottom:16px;">Virtual Card</div>
+      <div class="vcard">
+        <div class="vcard-top">
+          <div class="vcard-chip"></div>
+          <div class="vcard-brand">GlobalBank</div>
+        </div>
+        <div>
+          <div class="vcard-number">•••• •••• •••• 4821</div>
+          <div class="vcard-bottom">
+            <span id="vcardHolder">CARD HOLDER</span>
+            <span>VALID THRU 12/29</span>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px;text-align:center;">
+        <span class="vcard-status" style="background:var(--red-soft);color:var(--red);">Inactive</span>
+        <p style="font-size:13px;color:var(--muted);margin:14px 0 18px;line-height:1.6;">Your virtual card has not been activated yet. Request activation to start using it for online payments.</p>
+        <button class="btn-primary" onclick="requestCard()">Request Card Activation</button>
+      </div>
+    </div>
+
+    <!-- LOANS (decorative) -->
+    <div class="page" id="page-loans">
+      <div class="card-title" style="margin-bottom:16px;">Loan &amp; Mortgages</div>
+      <div class="card empty-state">
+        <div class="empty-icon">🏛️</div>
+        <div class="empty-title">No active loans</div>
+        <div class="empty-sub">You don't have any loans or mortgages on your account right now.</div>
+        <button class="btn-primary" onclick="applyLoan()" style="max-width:240px;margin:0 auto;">Apply for a Loan</button>
+      </div>
+    </div>
+
+    <!-- TRANSACTION LOGS -->
+    <div class="page" id="page-history">
+      <div class="card-title" style="margin-bottom:16px;">All Transaction Logs</div>
+      <div class="filter-row">
+        <button class="filter-btn active" onclick="filterTx('all',this)">All</button>
+        <button class="filter-btn" onclick="filterTx('in',this)">Deposits</button>
+        <button class="filter-btn" onclick="filterTx('out',this)">Withdrawals</button>
+        <button class="filter-btn" onclick="filterTx('send',this)">Domestic</button>
+        <button class="filter-btn" onclick="filterTx('wire',this)">Wire</button>
+      </div>
+      <div class="list" id="fullTxList">
+        <div class="empty-note">No transactions yet.</div>
+      </div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="page" id="page-settings">
+      <div class="card-title" style="margin-bottom:16px;">Settings</div>
+
+      <div class="card">
+        <div style="font-weight:800;font-size:16px;margin-bottom:16px;">Profile</div>
+        <div class="field"><label class="field-label">Nickname</label>
+          <div class="input-wrap"><input class="field-input" type="text" id="settingsNickname" placeholder="e.g. Rich"/></div></div>
+        <div class="field"><label class="field-label">Gender</label>
+          <div class="input-wrap"><select class="field-input" id="settingsGender">
+            <option value="">Prefer not to say</option>
+            <option value="male">Male</option>
+            <option value="female">Female</option>
+            <option value="other">Other</option>
+          </select></div></div>
+        <button class="btn-primary" onclick="saveSettings()">Save Changes</button>
+        <div class="success-msg" id="settingsSuccess">Settings saved.</div>
+      </div>
+
+      <div class="card">
+        <div class="settings-row">
+          <span class="settings-key">Notifications</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="settingsNotifications" onchange="toggleNotifications(this.checked)"/>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <span class="settings-key">Dark Mode</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="settingsDarkMode" onchange="toggleDarkMode(this.checked)"/>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <button class="btn-signout" style="width:100%;" onclick="doLogout()">Sign Out</button>
+    </div>
+
+    <!-- ADMIN -->
+    <div class="page" id="page-admin">
+      <div class="card-title" style="margin-bottom:16px;">Admin Panel</div>
+
+      <div class="card">
+        <div style="font-weight:800;font-size:16px;margin-bottom:16px;">Create New Member</div>
+        <div class="form-row">
+          <div class="field"><label class="field-label">Full Name</label>
+            <div class="input-wrap"><input class="field-input" type="text" id="newUserName" placeholder="e.g. John Doe"/></div></div>
+          <div class="field"><label class="field-label">Username (internal)</label>
+            <div class="input-wrap"><input class="field-input" type="text" id="newUsername" placeholder="e.g. johndoe"/></div></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label class="field-label">Password</label>
+            <div class="input-wrap"><input class="field-input" type="text" id="newUserPassword" placeholder="Set password"/></div></div>
+          <div class="field"><label class="field-label">Role</label>
+            <div class="input-wrap"><select class="field-input" id="newUserRole">
+              <option value="user">Member</option>
+              <option value="admin">Administrator</option>
+            </select></div></div>
+        </div>
+        <button class="btn-primary" onclick="createUser()">Create Member</button>
+        <div class="success-msg" id="createUserSuccess">Member created successfully.</div>
+        <div class="error-msg" id="createUserError">Fill all fields — username may already exist.</div>
+        <div class="acct-readout" id="newAcctReadout">
+          <div>
+            <div class="acct-readout-text">New Account ID — share this with the member</div>
+            <div class="acct-readout-id" id="newAcctIdText">—</div>
+          </div>
+          <button class="btn-copy" onclick="copyNewAcctId()">Copy</button>
+        </div>
+      </div>
+
+      <div class="section-title">All Members</div>
+      <div class="list" id="usersList" style="margin-bottom:20px;">
+        <div class="empty-note">Loading members...</div>
+      </div>
+
+      <div id="adminSettingsSection">
+        <div class="card">
+          <div style="font-weight:800;font-size:16px;margin-bottom:16px;">Change Admin Password</div>
+          <div class="field"><label class="field-label">Current Password</label>
+            <div class="input-wrap"><input class="field-input" type="password" id="curAdminPw" placeholder="Current password"/></div></div>
+          <div class="field"><label class="field-label">New Password</label>
+            <div class="input-wrap"><input class="field-input" type="password" id="newAdminPw" placeholder="New password"/></div></div>
+          <div class="field"><label class="field-label">Confirm New Password</label>
+            <div class="input-wrap"><input class="field-input" type="password" id="confAdminPw" placeholder="Confirm"/></div></div>
+          <button class="btn-primary" onclick="changeAdminPassword()">Update Password</button>
+          <div class="success-msg" id="adminPwSuccess">Admin password updated.</div>
+          <div class="error-msg" id="adminPwError">Check your passwords and try again.</div>
+        </div>
+
+        <div class="card">
+          <div style="font-weight:800;font-size:16px;margin-bottom:6px;">Danger Zone</div>
+          <div class="settings-row"><span class="settings-key">Clear all transactions</span>
+            <button class="chip-btn chip-danger" onclick="clearHistory()">Clear</button></div>
+          <div class="settings-row"><span class="settings-key">Reset balance to $0</span>
+            <button class="chip-btn chip-danger" onclick="resetBalance()">Reset</button></div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- EDIT MODAL -->
+<div class="modal-overlay" id="editModal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeEditModal()">✕</button>
+    <div class="modal-title">Edit Transaction</div>
+    <input type="hidden" id="editTxKey"/>
+    <div class="field"><label class="field-label">Type</label>
+      <div class="input-wrap"><select class="field-input" id="editTxType">
+        <option value="in">Deposit</option>
+        <option value="out">Withdrawal</option>
+        <option value="send">Domestic Transfer</option>
+        <option value="wire">Wire Transfer</option>
+      </select></div></div>
+    <div class="field"><label class="field-label">Amount ($)</label>
+      <div class="input-wrap"><input class="field-input" type="number" id="editTxAmount" placeholder="Amount" min="1"/></div></div>
+    <div class="field"><label class="field-label">Description</label>
+      <div class="input-wrap"><input class="field-input" type="text" id="editTxDesc" placeholder="Description"/></div></div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeEditModal()">Cancel</button>
+      <button class="btn-confirm" onclick="saveEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
